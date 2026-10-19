@@ -1,0 +1,19 @@
+[package]
+name = "rdigital_rf"
+version = "0.1.0"
+edition = "2021"
+description = "Native Rust reader for multi-directory Digital RF archives"
+license = "BSD-3-Clause"
+repository = "https://github.com/jvierine/rdigital_rf"
+readme = "README.md"
+keywords = ["digital-rf", "hdf5", "sdr", "radio", "radar"]
+categories = ["science", "filesystem"]
+
+[dependencies]
+anyhow = "1"
+hdf5 = { package = "hdf5-metno", version = "0.12" }
+num-complex = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"

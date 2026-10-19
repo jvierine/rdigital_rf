@@ -1,0 +1,3 @@
+digital_rf==2.6.14
+h5py
+numpy

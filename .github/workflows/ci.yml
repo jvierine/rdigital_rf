@@ -1,0 +1,42 @@
+name: Reader validation
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install HDF5 on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev pkg-config
+      - name: Install HDF5 on macOS
+        if: runner.os == 'macOS'
+        run: brew list hdf5 || brew install hdf5
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked --all-targets
+      - run: cargo test --locked --doc
+  upstream-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libhdf5-dev pkg-config
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: '3.11'
+          activate-environment: base
+          auto-activate-base: true
+      - run: conda run -n base python -m pip install -r tests/requirements.txt
+      - run: cargo build --locked --example read_vector
+      - run: conda run -n base python tests/compare_upstream.py --binary target/debug/examples/read_vector --report reports/parity.h5
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upstream-parity-report
+          path: reports/parity.h5
