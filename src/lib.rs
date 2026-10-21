@@ -20,6 +20,24 @@ struct ComplexValue {
     r: f64,
     i: f64,
 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ComplexI16 {
+    r: i16,
+    i: i16,
+}
+unsafe impl H5Type for ComplexI16 {
+    fn type_descriptor() -> hdf5::types::TypeDescriptor {
+        use hdf5::types::{CompoundField, CompoundType, TypeDescriptor};
+        TypeDescriptor::Compound(CompoundType {
+            fields: vec![
+                CompoundField::typed::<i16>("r", 0, 0),
+                CompoundField::typed::<i16>("i", 2, 1),
+            ],
+            size: 4,
+        })
+    }
+}
 unsafe impl H5Type for ComplexValue {
     fn type_descriptor() -> hdf5::types::TypeDescriptor {
         use hdf5::types::{CompoundField, CompoundType, TypeDescriptor};
@@ -111,6 +129,7 @@ struct Cached {
     data: Dataset,
     index: Vec<(u64, u64)>,
     rows: u64,
+    native_i16: bool,
 }
 #[derive(Clone, Debug)]
 pub struct SourceSpan {
@@ -166,6 +185,7 @@ pub struct Reader {
     cache: VecDeque<Cached>,
     cache_files: usize,
     minimum_bytes: usize,
+    maximum_bytes: Option<usize>,
     stats: CacheStats,
 }
 fn attr_u64(h: &File, n: &str) -> Result<u64> {
@@ -296,6 +316,7 @@ impl Reader {
             cache: VecDeque::new(),
             cache_files: 8,
             minimum_bytes: 64 * 1024 * 1024,
+            maximum_bytes: None,
             stats: CacheStats::default(),
         })
     }
@@ -307,6 +328,15 @@ impl Reader {
         self.clear_cache();
         self.cache_files = options.max_open_files;
         self.minimum_bytes = options.minimum_bytes;
+        Ok(())
+    }
+    /// Bound the HDF5 raw chunk cache per open RF file. A compressed chunk
+    /// larger than this limit is read directly rather than retained. File data
+    /// and read results are unchanged; callers can trade cache reuse for RAM.
+    pub fn set_cache_byte_limit(&mut self, maximum_bytes: usize) -> Result<()> {
+        ensure!(maximum_bytes > 0, "nonpositive RF cache ceiling");
+        self.clear_cache();
+        self.maximum_bytes = Some(maximum_bytes);
         Ok(())
     }
     pub fn cache_stats(&self) -> CacheStats {
@@ -379,6 +409,118 @@ impl Reader {
     pub fn channels(&self) -> Vec<&str> {
         self.channels.keys().map(String::as_str).collect()
     }
+    /// Strict single-subchannel complex-f32 read for streaming DSP. This avoids
+    /// the row-major/intermediate-column copy used by the polymorphic vector API.
+    /// Missing samples keep exactly the same error semantics as `read_vector`.
+    pub fn read_complex32(
+        &mut self,
+        start: u64,
+        length: usize,
+        channel: &str,
+        subchannel: usize,
+    ) -> Result<Vec<num_complex::Complex32>> {
+        ensure!(length > 0, "empty sample request");
+        let end = start
+            .checked_add(u64::try_from(length)?)
+            .context("sample overflow")?;
+        if let Some(values) = self.read_native_i16(channel, start..end, subchannel)? {
+            return Ok(values);
+        }
+        let samples = self
+            .read(channel, start..end, subchannel)?
+            .into_contiguous()?;
+        Ok(samples
+            .into_iter()
+            .map(|z| num_complex::Complex32::new(z.re as f32, z.im as f32))
+            .collect())
+    }
+    // Common streaming path: copy stored i16 I/Q straight to complex-f32.
+    // Other formats and overlapping roots retain the fully general reader.
+    fn read_native_i16(
+        &mut self,
+        channel: &str,
+        range: Range<u64>,
+        subchannel: usize,
+    ) -> Result<Option<Vec<num_complex::Complex32>>> {
+        let c = self
+            .channels
+            .get(channel)
+            .context("unknown DigitalRF channel")?;
+        ensure!(
+            subchannel < c.properties.num_subchannels,
+            "invalid subchannel"
+        );
+        if c.locations.len() != 1 || !c.properties.is_complex {
+            return Ok(None);
+        }
+        let location = c.locations[0].clone();
+        let rate = c.properties.clone();
+        let millis = |s: u64| -> Result<u64> {
+            Ok(u64::try_from(
+                u128::from(s)
+                    .checked_mul(u128::from(rate.sample_rate_denominator))
+                    .and_then(|n| n.checked_mul(1000))
+                    .context("timestamp overflow")?
+                    / u128::from(rate.sample_rate_numerator),
+            )?)
+        };
+        let mut ms = millis(range.start)? / location.file_ms * location.file_ms;
+        let last = millis(range.end - 1)? / location.file_ms * location.file_ms;
+        let mut values = Vec::with_capacity(usize::try_from(range.end - range.start)?);
+        let mut cursor = range.start;
+        let mut gaps = Vec::new();
+        loop {
+            let directory = (ms / 1000) / location.subdir_s * location.subdir_s;
+            let date = DateTime::<Utc>::from_timestamp(i64::try_from(directory)?, 0)
+                .context("timestamp outside calendar")?;
+            let path = location
+                .path
+                .join(date.format("%Y-%m-%dT%H-%M-%S").to_string())
+                .join(format!("rf@{}.{:03}.h5", ms / 1000, ms % 1000));
+            if let Some(f) = self.file(&path, rate.num_subchannels)? {
+                if !f.native_i16 {
+                    return Ok(None);
+                }
+                for (i, &(start, offset)) in f.index.iter().enumerate() {
+                    let stop = start + (f.index.get(i + 1).map_or(f.rows, |p| p.1) - offset);
+                    let lo = start.max(range.start);
+                    let hi = stop.min(range.end);
+                    if lo >= hi {
+                        continue;
+                    }
+                    if lo < cursor {
+                        return Ok(None);
+                    }
+                    if lo > cursor {
+                        gaps.push(cursor..lo)
+                    }
+                    let a = usize::try_from(offset + lo - start)?;
+                    let b = usize::try_from(offset + hi - start)?;
+                    let stored = f.data.read_slice_1d::<ComplexI16, _>((a..b, subchannel))?;
+                    values.extend(
+                        stored
+                            .iter()
+                            .map(|z| num_complex::Complex32::new(f32::from(z.r), f32::from(z.i))),
+                    );
+                    cursor = hi;
+                }
+            }
+            if ms == last {
+                break;
+            }
+            ms = ms
+                .checked_add(location.file_ms)
+                .context("file cadence overflow")?;
+            ensure!(ms <= last, "invalid file cadence");
+        }
+        if cursor < range.end {
+            gaps.push(cursor..range.end)
+        }
+        if !gaps.is_empty() {
+            return Err(MissingSamples { gaps }.into());
+        }
+        Ok(Some(values))
+    }
     pub fn properties(&self, channel: &str) -> Result<&Properties> {
         Ok(&self
             .channels
@@ -412,13 +554,20 @@ impl Reader {
                 a.checked_mul(b).context("RF dataset size overflow")
             })?;
         let bytes = self.minimum_bytes.max(logical);
+        let bytes = self
+            .maximum_bytes
+            .map_or(bytes, |maximum| bytes.min(maximum));
         let chunks = probe
             .chunk()
             .map(|chunk| chunk.iter().product::<usize>())
             .unwrap_or(1)
             .max(1);
         let chunk_count = probe.size().div_ceil(chunks);
-        let slots = 1_000_003usize.max(chunk_count.saturating_mul(10).saturating_add(1));
+        let slots = if self.maximum_bytes.is_some() {
+            65_537
+        } else {
+            1_000_003usize.max(chunk_count.saturating_mul(10).saturating_add(1))
+        };
         drop(probe);
         drop(h);
         let h = File::with_options()
@@ -460,12 +609,24 @@ impl Reader {
                 ensure!(stop <= next.0, "overlapping rf_data_index blocks");
             }
         }
+        let native_i16 = match data.dtype()?.to_descriptor()? {
+            hdf5::types::TypeDescriptor::Compound(c) => {
+                c.fields.len() == 2
+                    && c.fields.iter().all(|f| {
+                        (f.name == "r" || f.name == "i")
+                            && f.ty
+                                == hdf5::types::TypeDescriptor::Integer(hdf5::types::IntSize::U2)
+                    })
+            }
+            _ => false,
+        };
         self.cache.push_back(Cached {
             path: path.to_owned(),
             _file: h,
             data,
             index,
             rows,
+            native_i16,
         });
         while self.cache.len() > self.cache_files {
             self.cache.pop_front();
@@ -518,7 +679,13 @@ impl Reader {
                             }
                             let a = usize::try_from(offset + lo - start)?;
                             let b = usize::try_from(offset + hi - start)?;
-                            let data = if p.is_complex {
+                            let data = if p.is_complex && f.native_i16 {
+                                f.data
+                                    .read_slice_1d::<ComplexI16, _>((a..b, subchannel))?
+                                    .iter()
+                                    .map(|z| Complex64::new(f64::from(z.r), f64::from(z.i)))
+                                    .collect()
+                            } else if p.is_complex {
                                 f.data
                                     .read_slice_1d::<ComplexValue, _>((a..b, subchannel))?
                                     .iter()

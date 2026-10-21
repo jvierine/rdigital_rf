@@ -250,3 +250,70 @@ fn extreme_rational_timestamps_return_an_error_without_wrapping() {
     let error = r.read_vector(u64::MAX - 2, 1, "ch", None).unwrap_err();
     assert!(error.to_string().contains("timestamp arithmetic overflow"));
 }
+
+#[test]
+fn streaming_complex32_preserves_values_and_gap_errors() {
+    let t = tempfile::tempdir().unwrap();
+    let channel = properties(t.path(), 10, 1, 2);
+    file(&channel, 0, &[[0, 0], [7, 4]], &[0, 1, 2, 3, 7, 8, 9], 2);
+    let mut reader = Reader::open([t.path()]).unwrap();
+    let v = reader.read_complex32(7, 3, "ch", 1).unwrap();
+    assert_eq!(
+        v.iter().map(|z| z.re).collect::<Vec<_>>(),
+        vec![1007., 1008., 1009.]
+    );
+    assert_eq!(
+        v.iter().map(|z| z.im).collect::<Vec<_>>(),
+        vec![-7., -8., -9.]
+    );
+    assert!(reader
+        .read_complex32(2, 6, "ch", 0)
+        .unwrap_err()
+        .downcast_ref::<rdigital_rf::MissingSamples>()
+        .is_some());
+    assert!(reader.read_complex32(0, 0, "ch", 0).is_err());
+    assert!(reader.read_complex32(u64::MAX, 2, "ch", 0).is_err());
+    assert!(reader.read_complex32(7, 3, "ch", 2).is_err());
+}
+
+#[test]
+fn native_streaming_reads_cross_file_and_hour_boundaries() {
+    let t = tempfile::tempdir().unwrap();
+    let ch = properties(t.path(), 10, 1, 1);
+    file(&ch, 3599000, &[[35990, 0]], &(0..10).collect::<Vec<_>>(), 1);
+    file(
+        &ch,
+        3600000,
+        &[[36000, 0]],
+        &(10..20).collect::<Vec<_>>(),
+        1,
+    );
+    let mut r = Reader::open([t.path()]).unwrap();
+    let z = r.read_complex32(35995, 10, "ch", 0).unwrap();
+    assert_eq!(
+        z.iter().map(|v| v.re as i16).collect::<Vec<_>>(),
+        (5..15).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        z.iter().map(|v| v.im as i16).collect::<Vec<_>>(),
+        (-14..=-5).rev().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn bounded_cache_preserves_sparse_native_iq_reads() {
+    let t = tempfile::tempdir().unwrap();
+    let c = properties(t.path(), 10000, 1, 1);
+    file(&c, 0, &[[0, 0]], &(0..10000).collect::<Vec<_>>(), 1);
+    let mut r = Reader::open([t.path()]).unwrap();
+    r.set_cache_byte_limit(1024).unwrap();
+    for start in [0, 9000, 20, 9990, 300, 8000] {
+        let z = r.read_complex32(start, 5, "ch", 0).unwrap();
+        for (i, v) in z.iter().enumerate() {
+            assert_eq!(v.re, (start as usize + i) as f32);
+            assert_eq!(v.im, -((start as usize + i) as f32));
+        }
+    }
+    assert_eq!(r.cache_stats().last_chunk_cache_bytes, 1024);
+    assert!(r.set_cache_byte_limit(0).is_err());
+}

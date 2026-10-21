@@ -121,3 +121,15 @@ history are recorded in [PROVENANCE.md](PROVENANCE.md).
 
 BSD-3-Clause. DigitalRF is a separate project; its name does not imply
 endorsement of this implementation.
+
+## Bounded streaming receiver reads
+
+`Reader::read_complex32(start, length, channel, subchannel)` returns a contiguous
+`Vec<Complex32>` and reports indexed gaps as `MissingSamples`. Native complex
+int16 recordings convert directly to complex float32; other supported formats
+use the general reader. Integer sample arithmetic preserves absolute indices
+above `2^53`. Set `CacheOptions::max_open_files` and call
+`set_cache_byte_limit(bytes)` to cap the HDF5 raw chunk cache per open file.
+This ceiling changes cache reuse, not sample values or gap handling. It does
+not limit the requested output vector, so streaming clients should bound their
+read lengths. These APIs are used by the experimental Rust ionosonde receiver.
