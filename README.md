@@ -53,6 +53,25 @@ The application above also needs `anyhow = "1"` for its example return type.
 
 ## Implemented behavior
 
+### Numeric Digital Metadata (read-only)
+
+`metadata::Reader::open(channel_dir)` opens only `dmd_properties.h5`.
+`read(start..end, &["tx_idxs", "max_snr"])` selects exact integer sample keys
+in a **half-open** window (unlike Python's inclusive ending sample). It derives
+candidate filenames from the rational sample rate and cadences, without
+recursively scanning the archive. Missing files are empty coverage; unreadable
+files, missing requested fields and unsupported types return errors.
+
+Numeric scalar/array dtypes and shapes are preserved, including 64-bit integer
+timestamps. Nested numeric fields can be selected by HDF5 path. Strings, complex
+datasets, automatic bounds discovery, multi-root metadata merging and metadata
+writing are not yet supported. This is not a full Python API replacement.
+
+Run the upstream Python writer comparison with
+`conda run -n base python tests/compare_metadata.py`.
+
+### Digital RF
+
 - Multiple top-level channel directories, recording directories containing
   `rf_data/`, or individual channel directories. Duplicate directory arguments
   are deduplicated.

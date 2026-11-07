@@ -3,6 +3,7 @@
 //! Missing files and indexed gaps are returned explicitly, never zero-filled.
 //! No RF conversion, pack files, or persistent index is created.
 #![doc = include_str!("../README.md")]
+pub mod metadata;
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use hdf5::{Dataset, File, H5Type};

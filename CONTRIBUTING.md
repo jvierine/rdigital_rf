@@ -32,7 +32,7 @@ The initial upstream review should cover:
   defaults.
 - HDF5 and Rust version support, platform coverage and reproducible performance
   comparisons on representative compressed archives.
-- APIs still missing: Digital Metadata, remote transports, writer support and
+- APIs still missing: nonnumeric/full Digital Metadata convenience APIs, remote transports, writer support and
   broader reader conveniences, if those are in scope for upstream.
 
 Do not describe this implementation as fully compatible, upstream-approved or
