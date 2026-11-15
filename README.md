@@ -133,3 +133,38 @@ above `2^53`. Set `CacheOptions::max_open_files` and call
 This ceiling changes cache reuse, not sample values or gap handling. It does
 not limit the requested output vector, so streaming clients should bound their
 read lengths. These APIs are used by the experimental Rust ionosonde receiver.
+
+### Optional raw binary container
+
+Ordinary Digital RF HDF5 archives remain the default. The Rust reader also
+supports the opt-in `rdigital_rf` raw-container extension (version 1). This is
+not a format supported by the upstream Python DigitalRF reader.
+
+`Reader::open` detects either container automatically. `get_bounds`/`bounds`,
+`read`, `read_vector` and `read_complex32` keep their sample indices, promotion,
+subchannel and gap behavior. Mixed recording roots are allowed when their
+channel properties agree. No missing samples are filled with zeros.
+
+To write raw chunks, explicitly construct `raw::RawWriter` with `raw::Options`.
+The default options describe signed 8-bit complex samples, one subchannel,
+25 MS/s and one-second files. Set the rate, type and layout to match the input;
+`write(start_sample, bytes)` accepts little-endian bytes in sample, subchannel,
+real/imaginary order. Supported components are signed i8/i16 and IEEE f32/f64;
+real recordings are supported too. Values are unscaled counts. `ring_files`
+optionally limits the number of finalized chunks; `None` retains an archive.
+
+`drf_properties.h5` describes the channel. Each finalized `rf@SECONDS.MMM.raw`
+has a small `rf@SECONDS.MMM.h5` sidecar containing the format version, type,
+shape and `rf_data_index`. The sidecar is the commit marker: the payload is
+published first, metadata last. Readers ignore partial chunks. A chunk is
+immutable after publication; `flush()` finalizes it, so subsequent writes must
+use another cadence interval. Open readers may retain an evicted inode until
+cache eviction, but never read reused storage under an old index.
+
+There is one writer per channel. Version 1 requires a new channel directory;
+after a process crash, inspect partial files and the writer lock before
+starting a new recording directory. Dropping a writer deliberately does not
+publish pending samples: call `flush()` to finalize them. `durable=true` syncs
+payload, metadata and the commit directory; RAM rings normally leave it off.
+Cadences must align to integer sample counts and divide the subdirectory period.
+HDF5 metadata changes remain outside the high-rate sample read/write path.

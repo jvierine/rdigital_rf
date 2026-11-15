@@ -1,8 +1,9 @@
 //! Direct local Digital RF 2.x reads from multiple top-level directories.
 //! Absolute sample indices stay u64; file-time arithmetic uses checked u128.
 //! Missing files and indexed gaps are returned explicitly, never zero-filled.
-//! No RF conversion, pack files, or persistent index is created.
+//! HDF5 remains the default; an explicit raw-container extension is also supported.
 #![doc = include_str!("../README.md")]
+pub mod raw;
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use hdf5::{Dataset, File, H5Type};
@@ -144,7 +145,8 @@ struct Channel {
 struct Cached {
     path: PathBuf,
     _file: File,
-    data: Dataset,
+    data: Option<Dataset>,
+    raw: Option<raw::Chunk>,
     index: Vec<(u64, u64)>,
     rows: u64,
     native_i16: bool,
@@ -497,7 +499,7 @@ impl Reader {
                 .join(date.format("%Y-%m-%dT%H-%M-%S").to_string())
                 .join(format!("rf@{}.{:03}.h5", ms / 1000, ms % 1000));
             if let Some(f) = self.file(&path, rate.num_subchannels)? {
-                if !f.native_i16 && !f.native_i8 {
+                if f.raw.is_none() && !f.native_i16 && !f.native_i8 {
                     return Ok(None);
                 }
                 for (i, &(start, offset)) in f.index.iter().enumerate() {
@@ -515,15 +517,25 @@ impl Reader {
                     }
                     let a = usize::try_from(offset + lo - start)?;
                     let b = usize::try_from(offset + hi - start)?;
-                    if f.native_i8 {
-                        let stored = f.data.read_slice_1d::<ComplexI8, _>((a..b, subchannel))?;
+                    if let Some(raw) = &f.raw {
+                        values.extend(raw.read32(a, b, subchannel)?);
+                    } else if f.native_i8 {
+                        let stored = f
+                            .data
+                            .as_ref()
+                            .unwrap()
+                            .read_slice_1d::<ComplexI8, _>((a..b, subchannel))?;
                         values.extend(
                             stored.iter().map(|z| {
                                 num_complex::Complex32::new(f32::from(z.r), f32::from(z.i))
                             }),
                         );
                     } else {
-                        let stored = f.data.read_slice_1d::<ComplexI16, _>((a..b, subchannel))?;
+                        let stored = f
+                            .data
+                            .as_ref()
+                            .unwrap()
+                            .read_slice_1d::<ComplexI16, _>((a..b, subchannel))?;
                         values.extend(
                             stored.iter().map(|z| {
                                 num_complex::Complex32::new(f32::from(z.r), f32::from(z.i))
@@ -574,6 +586,35 @@ impl Reader {
             Err(_) if !path.exists() => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
         };
+        if h.attr_names()?
+            .iter()
+            .any(|n| n == "rdigital_rf_raw_version")
+        {
+            let raw = match raw::Chunk::open(path, &h, subchannels) {
+                Ok(raw) => raw,
+                Err(_) if !path.exists() || !path.with_extension("raw").exists() => {
+                    return Ok(None)
+                }
+                Err(e) => return Err(e),
+            };
+            let index = raw.index.clone();
+            let rows = raw.rows;
+            self.stats.file_opens += 1;
+            self.cache.push_back(Cached {
+                path: path.to_owned(),
+                _file: h,
+                data: None,
+                raw: Some(raw),
+                index,
+                rows,
+                native_i16: false,
+                native_i8: false,
+            });
+            while self.cache.len() > self.cache_files {
+                self.cache.pop_front();
+            }
+            return Ok(self.cache.back());
+        }
         let probe = h.dataset("rf_data")?;
         let logical = probe
             .shape()
@@ -662,7 +703,8 @@ impl Reader {
         self.cache.push_back(Cached {
             path: path.to_owned(),
             _file: h,
-            data,
+            data: Some(data),
+            raw: None,
             index,
             rows,
             native_i16,
@@ -719,26 +761,36 @@ impl Reader {
                             }
                             let a = usize::try_from(offset + lo - start)?;
                             let b = usize::try_from(offset + hi - start)?;
-                            let data = if p.is_complex && f.native_i16 {
+                            let data = if let Some(raw) = &f.raw {
+                                raw.read64(a, b, subchannel)?
+                            } else if p.is_complex && f.native_i16 {
                                 f.data
+                                    .as_ref()
+                                    .unwrap()
                                     .read_slice_1d::<ComplexI16, _>((a..b, subchannel))?
                                     .iter()
                                     .map(|z| Complex64::new(f64::from(z.r), f64::from(z.i)))
                                     .collect()
                             } else if p.is_complex && f.native_i8 {
                                 f.data
+                                    .as_ref()
+                                    .unwrap()
                                     .read_slice_1d::<ComplexI8, _>((a..b, subchannel))?
                                     .iter()
                                     .map(|z| Complex64::new(f64::from(z.r), f64::from(z.i)))
                                     .collect()
                             } else if p.is_complex {
                                 f.data
+                                    .as_ref()
+                                    .unwrap()
                                     .read_slice_1d::<ComplexValue, _>((a..b, subchannel))?
                                     .iter()
                                     .map(|z| Complex64::new(z.r, z.i))
                                     .collect()
                             } else {
                                 f.data
+                                    .as_ref()
+                                    .unwrap()
                                     .read_slice_1d::<f64, _>((a..b, subchannel))?
                                     .iter()
                                     .map(|x| Complex64::new(*x, 0.))
@@ -804,6 +856,9 @@ impl Reader {
     }
     /// Inclusive first/last stored sample across all directories. Only file
     /// indices are inspected, never RF voltage datasets. Gaps remain possible.
+    pub fn get_bounds(&mut self, channel: &str) -> Result<Option<(u64, u64)>> {
+        self.bounds(channel)
+    }
     pub fn bounds(&mut self, channel: &str) -> Result<Option<(u64, u64)>> {
         let c = self
             .channels

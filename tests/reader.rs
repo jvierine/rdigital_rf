@@ -387,3 +387,66 @@ fn signed_eight_bit_native_stream_preserves_extremes_and_index_gaps() {
         126.
     );
 }
+
+#[test]
+fn raw_container_matches_hdf5_for_multichannel_gapped_vectors() {
+    use rdigital_rf::raw::{Component, Options, RawWriter};
+    let h = tempfile::tempdir().unwrap();
+    let raw = tempfile::tempdir().unwrap();
+    let channel = properties(h.path(), 10, 1, 2);
+    file(
+        &channel,
+        0,
+        &[[2, 0], [7, 3]],
+        &[-128, 0, 127, -30000, 30000],
+        2,
+    );
+    let mut w = RawWriter::create(
+        raw.path().join("ch"),
+        Options {
+            component: Component::I16,
+            num_subchannels: 2,
+            sample_rate_numerator: 10,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let encode = |v: &[i16]| {
+        v.iter()
+            .flat_map(|&x| {
+                (0..2)
+                    .flat_map(move |c| [x + c * 1000, -x].into_iter().flat_map(|n| n.to_le_bytes()))
+            })
+            .collect::<Vec<_>>()
+    };
+    w.write(2, &encode(&[-128, 0, 127])).unwrap();
+    w.write(7, &encode(&[-30000, 30000])).unwrap();
+    w.flush().unwrap();
+    let mut a = Reader::open([h.path()]).unwrap();
+    let mut b = Reader::open([raw.path()]).unwrap();
+    assert_eq!(a.bounds("ch").unwrap(), b.bounds("ch").unwrap());
+    for ch in 0..2 {
+        assert_eq!(
+            a.read("ch", 0..10, ch).unwrap().gaps,
+            b.read("ch", 0..10, ch).unwrap().gaps
+        );
+        for (start, n) in [(2, 3), (7, 2)] {
+            assert_eq!(
+                a.read_complex32(start, n, "ch", ch).unwrap(),
+                b.read_complex32(start, n, "ch", ch).unwrap()
+            );
+        }
+    }
+    assert_eq!(
+        a.read_vector(2, 3, "ch", None).unwrap().into_complex64(),
+        b.read_vector(2, 3, "ch", None).unwrap().into_complex64()
+    );
+    let mut mixed = Reader::open([h.path(), raw.path()]).unwrap();
+    assert_eq!(
+        mixed
+            .read_vector(2, 3, "ch", None)
+            .unwrap()
+            .into_complex64(),
+        a.read_vector(2, 3, "ch", None).unwrap().into_complex64()
+    );
+}

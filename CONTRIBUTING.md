@@ -7,9 +7,10 @@ requested or agreed. Follow the upstream project's
 [contribution guidelines](https://github.com/MITHaystack/digital_rf/blob/master/CONTRIBUTING.rst)
 before proposing an integration there.
 
-Keep changes independent of radar-specific pipelines. Work directly with the
-Digital RF format; do not introduce RF staging, combined archive directories or
-another persistent RF representation. Keep gap semantics explicit.
+Keep changes independent of radar-specific pipelines. Keep ordinary Digital RF HDF5 as the default. The explicitly selected raw
+container is a separate rdigital_rf extension, not an upstream DigitalRF format.
+Do not add implicit conversions, RF staging or combined archive directories.
+Keep gap semantics explicit for both containers.
 
 Before submitting a change:
 
@@ -32,7 +33,7 @@ The initial upstream review should cover:
   defaults.
 - HDF5 and Rust version support, platform coverage and reproducible performance
   comparisons on representative compressed archives.
-- APIs still missing: Digital Metadata, remote transports, writer support and
+- APIs still missing: Digital Metadata, remote transports, HDF5 writer support and
   broader reader conveniences, if those are in scope for upstream.
 
 Do not describe this implementation as fully compatible, upstream-approved or
