@@ -1,0 +1,13 @@
+% Numerical report and source provenance are retained in HDF5 metadata.
+\begin{tabularx}{\linewidth}{@{}Xllrr@{}}\toprule
+Container / cache & Type & API & Full & Sparse\\\midrule
+HDF5, uncompressed & i8 & direct & 2.88 & 0.59 \\
+HDF5, uncompressed & i8 & vector & 25.77 & 0.88 \\
+HDF5, gzip-1 & i8 & direct & 51.49 & 3.59 \\
+HDF5, gzip-1, 128 KiB cache & i8 & direct & 56.94 & 9.66 \\
+HDF5, uncompressed & i16 & direct & 3.39 & 0.60 \\
+Raw & i8 & direct & 18.27 & 1.05 \\
+Raw & i8 & vector & 32.67 & 1.29 \\
+Raw & i16 & direct & 18.56 & 1.07 \\
+\bottomrule
+\end{tabularx}

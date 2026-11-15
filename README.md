@@ -114,10 +114,29 @@ runner in `tests/compare_upstream.py` compares HDF5 reads with the official
 Python package; it writes its report as HDF5. It does not establish full upstream
 compatibility.
 
-A single bounded comparison on DOB read 40 million identical complex-i8 samples
-in 1.10 s from HDF5 and 0.42 s from raw. This is a receiver-local read benchmark,
-not sustained acquisition or end-to-end decoder throughput. Use
-`examples/bench_raw.rs` to measure a representative workload.
+## Benchmarks
+
+The [API guide](docs/rdigital_rf-api.pdf) and
+[reproducible benchmark](docs/benchmarks/README.md) compare HDF5/raw containers,
+i8/i16 components, direct/vector APIs, gzip and cache settings. Each result is
+checked against the same synthetic samples. Five timed repeats follow a warm-up.
+
+For complex-i8 reads on the measured Linux system:
+
+| Configuration | Full read (ms) | Sparse reads (ms) |
+|---|---:|---:|
+| Uncompressed HDF5, direct API | 2.88 | 0.59 |
+| Gzip HDF5, default cache | 51.49 | 3.59 |
+| Gzip HDF5, 128 KiB cache | 56.94 | 9.66 |
+| Raw, direct API | 18.27 | 1.05 |
+
+Full reads contain 2,097,152 samples; sparse reads total 131,072. These are
+warm-cache medians, not disk or acquisition throughput. Raw beats compressed
+HDF5 here; uncompressed HDF5 is faster than raw. The general HDF5 vector API
+took 25.77 ms for the full read versus 2.88 ms for the direct API. Results depend
+on layout, cache, access pattern and hardware; the guide includes the complete
+matrix and its limits. All measurements are retained in an
+[HDF5 report](docs/benchmarks/feature-matrix.h5).
 
 ## Development and license
 

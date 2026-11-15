@@ -249,4 +249,52 @@ extremes, subchannels, mixed roots, partial chunks and ring eviction.
 The upstream Python comparison covers a tested HDF5 subset, not the raw
 extension. See \url{https://github.com/jvierine/rdigital_rf} and
 \url{https://github.com/MITHaystack/digital_rf}.
+
+\chapterpage{Benchmarks across reader and container options}
+These measurements compare eight configurations with two access patterns. All
+return the same complex-f32 values for a given stored component type, and every
+output was checked exactly. The table gives median elapsed milliseconds over
+five timed repeats, after one untimed warm-up. Lower is faster.
+
+\par\medskip
+\input{benchmarks/table.tex}
+
+\textbf{Access patterns.} Each fixture contains 2,097,152 complex samples in
+one channel, one subchannel and one one-second interval. ``Full'' reads all
+samples in one request. ``Sparse'' reads 32 windows of 4096 samples, spaced
+65,536 samples apart: 131,072 samples in total. Compare configurations within
+one column; the two columns transfer different amounts of data.
+
+\textbf{API and cache settings.} ``Direct'' means \api{read_complex32};
+``vector'' means \api{read_vector} with one subchannel and complex-f32 output,
+without an additional conversion to complex-f64. Uncompressed HDF5 datasets
+use contiguous storage. Gzip level 1 uses chunks of 65,536 complex-i8 samples.
+The default HDF5 cache has a 64 MiB minimum; the capped case sets a 128 KiB
+per-file ceiling. The same reader is retained across warm-up and timed repeats.
+
+\textbf{Data and hardware.} The synthetic I/Q components are deterministic,
+compressible staircase sequences in the signed 8-bit range. The i16 fixture
+multiplies those values by 256. The combined payload and metadata occupy about
+4.01 MiB for i8 HDF5 or raw, 8.01 MiB for i16, and 0.75 MiB for gzip-i8 HDF5.
+The benchmark ran on an Intel Core i9-11950H Linux x86-64 system with ext4 and a
+warmed OS page cache. Timing excludes fixture construction and correctness
+checks, but includes allocation of the returned vectors.
+
+\textbf{Interpretation.} Raw is about 2.8 times faster than the default gzip
+case for full reads here. Warm, contiguous, uncompressed HDF5 is about 6.3 times
+faster than raw for the same i8 selection. The direct API is about 8.9 times
+faster than the general vector API for that uncompressed HDF5 full read. A
+larger HDF5 cache improves repeated sparse compressed reads by about 2.7 times
+in this workload. Raw therefore does not provide a universal speed advantage;
+choose the container, API and cache policy using the intended access pattern.
+
+These are warm-cache read measurements, not sustained disk, acquisition,
+writer durability or end-to-end receiver throughput. Compressibility is
+synthetic and does not predict the size of radio-noise recordings. A separate
+40-million-sample read on DOB took 1.10 s from its HDF5 recording and 0.42 s
+from raw. That different recording, hardware and workload is not directly
+comparable with this table. Numerical reports retain every repeat, extrema,
+fixture size and correctness result; reproduce the matrix on the target system.
+% Reproduce with cargo run --release --example bench_features -- NEW_REPORT.h5.
+% Benchmark source and toolchain provenance are in the HDF5 report metadata.
 \end{document}
