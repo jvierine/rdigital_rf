@@ -317,3 +317,73 @@ fn bounded_cache_preserves_sparse_native_iq_reads() {
     assert_eq!(r.cache_stats().last_chunk_cache_bytes, 1024);
     assert!(r.set_cache_byte_limit(0).is_err());
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IQ8 {
+    r: i8,
+    i: i8,
+}
+unsafe impl H5Type for IQ8 {
+    fn type_descriptor() -> TypeDescriptor {
+        TypeDescriptor::Compound(CompoundType {
+            fields: vec![
+                CompoundField::typed::<i8>("r", 0, 0),
+                CompoundField::typed::<i8>("i", 1, 1),
+            ],
+            size: 2,
+        })
+    }
+}
+#[test]
+fn signed_eight_bit_native_stream_preserves_extremes_and_index_gaps() {
+    let t = tempfile::tempdir().unwrap();
+    let ch = properties(t.path(), 50_000_000, 1, 1);
+    let props = File::open_rw(ch.join("drf_properties.h5")).unwrap();
+    props
+        .attr("H5Tget_size")
+        .unwrap()
+        .write_scalar(&1u64)
+        .unwrap();
+    drop(props);
+    let epoch = 50_000_000u64;
+    let folder = ch.join("1970-01-01T00-00-00");
+    std::fs::create_dir_all(&folder).unwrap();
+    let h = File::create(folder.join("rf@1.000.h5")).unwrap();
+    let data = [
+        IQ8 { r: -128, i: 127 },
+        IQ8 { r: 0, i: -1 },
+        IQ8 { r: 126, i: -127 },
+        IQ8 { r: 4, i: 5 },
+    ];
+    h.new_dataset::<IQ8>()
+        .shape([4, 1])
+        .create("rf_data")
+        .unwrap()
+        .write_raw(&data)
+        .unwrap();
+    h.new_dataset::<u64>()
+        .shape([2, 2])
+        .create("rf_data_index")
+        .unwrap()
+        .write_raw(&[epoch, 0, epoch + 4, 2])
+        .unwrap();
+    drop(h);
+    let mut r = Reader::open([t.path()]).unwrap();
+    let v = r.read_complex32(epoch, 2, "ch", 0).unwrap();
+    assert_eq!(v[0], num_complex::Complex32::new(-128., 127.));
+    assert_eq!(v[1], num_complex::Complex32::new(0., -1.));
+    let general = r.read("ch", epoch..epoch + 6, 0).unwrap();
+    assert_eq!(general.gaps, vec![epoch + 2..epoch + 4]);
+    assert!(r.read_complex32(epoch, 6, "ch", 0).is_err());
+    let tail = r.read_complex32(epoch + 4, 2, "ch", 0).unwrap();
+    assert_eq!(tail[0], num_complex::Complex32::new(126., -127.));
+    assert_eq!(
+        r.read("ch", epoch + 4..epoch + 6, 0)
+            .unwrap()
+            .into_contiguous()
+            .unwrap()[0]
+            .re,
+        126.
+    );
+}

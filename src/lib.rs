@@ -22,6 +22,24 @@ struct ComplexValue {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct ComplexI8 {
+    r: i8,
+    i: i8,
+}
+unsafe impl H5Type for ComplexI8 {
+    fn type_descriptor() -> hdf5::types::TypeDescriptor {
+        use hdf5::types::{CompoundField, CompoundType, TypeDescriptor};
+        TypeDescriptor::Compound(CompoundType {
+            fields: vec![
+                CompoundField::typed::<i8>("r", 0, 0),
+                CompoundField::typed::<i8>("i", 1, 1),
+            ],
+            size: 2,
+        })
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct ComplexI16 {
     r: i16,
     i: i16,
@@ -130,6 +148,7 @@ struct Cached {
     index: Vec<(u64, u64)>,
     rows: u64,
     native_i16: bool,
+    native_i8: bool,
 }
 #[derive(Clone, Debug)]
 pub struct SourceSpan {
@@ -423,7 +442,7 @@ impl Reader {
         let end = start
             .checked_add(u64::try_from(length)?)
             .context("sample overflow")?;
-        if let Some(values) = self.read_native_i16(channel, start..end, subchannel)? {
+        if let Some(values) = self.read_native_integer(channel, start..end, subchannel)? {
             return Ok(values);
         }
         let samples = self
@@ -434,9 +453,9 @@ impl Reader {
             .map(|z| num_complex::Complex32::new(z.re as f32, z.im as f32))
             .collect())
     }
-    // Common streaming path: copy stored i16 I/Q straight to complex-f32.
+    // Common streaming path: copy stored signed i8/i16 I/Q straight to complex-f32.
     // Other formats and overlapping roots retain the fully general reader.
-    fn read_native_i16(
+    fn read_native_integer(
         &mut self,
         channel: &str,
         range: Range<u64>,
@@ -478,7 +497,7 @@ impl Reader {
                 .join(date.format("%Y-%m-%dT%H-%M-%S").to_string())
                 .join(format!("rf@{}.{:03}.h5", ms / 1000, ms % 1000));
             if let Some(f) = self.file(&path, rate.num_subchannels)? {
-                if !f.native_i16 {
+                if !f.native_i16 && !f.native_i8 {
                     return Ok(None);
                 }
                 for (i, &(start, offset)) in f.index.iter().enumerate() {
@@ -496,12 +515,21 @@ impl Reader {
                     }
                     let a = usize::try_from(offset + lo - start)?;
                     let b = usize::try_from(offset + hi - start)?;
-                    let stored = f.data.read_slice_1d::<ComplexI16, _>((a..b, subchannel))?;
-                    values.extend(
-                        stored
-                            .iter()
-                            .map(|z| num_complex::Complex32::new(f32::from(z.r), f32::from(z.i))),
-                    );
+                    if f.native_i8 {
+                        let stored = f.data.read_slice_1d::<ComplexI8, _>((a..b, subchannel))?;
+                        values.extend(
+                            stored.iter().map(|z| {
+                                num_complex::Complex32::new(f32::from(z.r), f32::from(z.i))
+                            }),
+                        );
+                    } else {
+                        let stored = f.data.read_slice_1d::<ComplexI16, _>((a..b, subchannel))?;
+                        values.extend(
+                            stored.iter().map(|z| {
+                                num_complex::Complex32::new(f32::from(z.r), f32::from(z.i))
+                            }),
+                        );
+                    }
                     cursor = hi;
                 }
             }
@@ -620,6 +648,17 @@ impl Reader {
             }
             _ => false,
         };
+        let native_i8 = match data.dtype()?.to_descriptor()? {
+            hdf5::types::TypeDescriptor::Compound(c) => {
+                c.fields.len() == 2
+                    && c.fields.iter().all(|f| {
+                        (f.name == "r" || f.name == "i")
+                            && f.ty
+                                == hdf5::types::TypeDescriptor::Integer(hdf5::types::IntSize::U1)
+                    })
+            }
+            _ => false,
+        };
         self.cache.push_back(Cached {
             path: path.to_owned(),
             _file: h,
@@ -627,6 +666,7 @@ impl Reader {
             index,
             rows,
             native_i16,
+            native_i8,
         });
         while self.cache.len() > self.cache_files {
             self.cache.pop_front();
@@ -682,6 +722,12 @@ impl Reader {
                             let data = if p.is_complex && f.native_i16 {
                                 f.data
                                     .read_slice_1d::<ComplexI16, _>((a..b, subchannel))?
+                                    .iter()
+                                    .map(|z| Complex64::new(f64::from(z.r), f64::from(z.i)))
+                                    .collect()
+                            } else if p.is_complex && f.native_i8 {
+                                f.data
+                                    .read_slice_1d::<ComplexI8, _>((a..b, subchannel))?
                                     .iter()
                                     .map(|z| Complex64::new(f64::from(z.r), f64::from(z.i)))
                                     .collect()
