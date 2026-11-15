@@ -1,300 +1,229 @@
 \documentclass[10pt,a4paper]{article}
-% Examples are included from the checked Rust sources so signatures stay aligned.
 \usepackage[T1]{fontenc}
 \usepackage{lmodern,microtype}
 \usepackage[margin=22mm]{geometry}
-\usepackage{booktabs,tabularx,array,xcolor,listings,enumitem,fancyhdr}
-\usepackage[pdftitle={Digital RF in Rust: API guide},pdfauthor={},colorlinks=true,linkcolor=blue!45!black,urlcolor=blue!45!black]{hyperref}
-\definecolor{ink}{HTML}{17394D}
-\definecolor{wash}{HTML}{F4F6F8}
-\lstdefinelanguage{Rust}{keywords={use,fn,let,mut,pub,struct,enum,impl,if,else,for,in,match,return,as,Some,None,Ok,Err,true,false},sensitive=true,morecomment=[l]{//},morestring=[b]"}
-\lstset{language=Rust,basicstyle=\ttfamily\footnotesize,keywordstyle=\color{ink}\bfseries,commentstyle=\color{black!55},stringstyle=\color{blue!45!black},backgroundcolor=\color{wash},frame=single,rulecolor=\color{black!12},framesep=6pt,breaklines=true,columns=fullflexible,keepspaces=true,showstringspaces=false,aboveskip=8pt,belowskip=8pt}
-\setlength{\parindent}{0pt}\setlength{\parskip}{6pt}
-\setlist[itemize]{nosep,leftmargin=1.5em}
-\pagestyle{fancy}\fancyhf{}\fancyhead[L]{\small\textcolor{ink}{rdigital\_rf}}\fancyhead[R]{\small API guide}\fancyfoot[C]{\thepage}
+\usepackage{booktabs,tabularx,array,listings,enumitem,fancyhdr}
+\usepackage[pdftitle={rdigital\_rf API reference},hidelinks]{hyperref}
+\lstset{basicstyle=\ttfamily\footnotesize,columns=fullflexible,keepspaces=true,breaklines=true,showstringspaces=false,aboveskip=5pt,belowskip=5pt}
+\setlength{\parindent}{0pt}\setlength{\parskip}{5pt}
+\setlist[itemize]{nosep,leftmargin=1.3em}
+\pagestyle{fancy}\fancyhf{}\fancyhead[L]{\small rdigital\_rf API reference}\fancyfoot[C]{\thepage}
 \setlength{\headheight}{14pt}
 \newcommand{\api}[1]{\texttt{\detokenize{#1}}}
-\newcommand{\chapterpage}[1]{\clearpage\section{#1}}
 \begin{document}
-\begin{center}
-{\LARGE\bfseries\textcolor{ink}{Digital RF in Rust}}\\[5pt]
-{\large rdigital\_rf: API guide and examples}\\[6pt]
-Reader API and optional raw binary container
-\end{center}
-\section{Overview and installation}
-\api{rdigital_rf} is a Rust implementation for accessing time-indexed radio
-samples. It reads original Digital RF 2.x HDF5 recordings and an optional raw
-binary container through the same reader API. Samples keep their absolute
-indices and gaps remain explicit. Recording directories do not have to be
-combined or converted before reading.
-
-HDF5 remains the default format. Raw writing is opt-in through
-\api{raw::RawWriter}. The raw extension separates the high-rate sample bytes
-from HDF5 metadata; the upstream Python DigitalRF reader does not support it.
-This independent crate implements a subset of DigitalRF functionality, not the
-complete Python API. An ordinary Digital RF HDF5 writer is not implemented.
-
-Install Rust, a C toolchain and the native HDF5 development library. On
-Debian/Ubuntu, install \api{libhdf5-dev} and \api{pkg-config}; with Homebrew,
-install \api{hdf5} and \api{pkg-config}. The crate is not yet on crates.io.
-Add the crate from Git:
-\begin{lstlisting}[language={}]
-[dependencies]
-rdigital_rf = { git = "https://github.com/jvierine/rdigital_rf" }
-anyhow = "1"
-\end{lstlisting}
-\subsection*{A first read}
+\section*{Reader}
+Reads Digital RF 2.x HDF5 and the raw container. HDF5 is the default format;
+\api{Reader} detects the container automatically. All \api{Result<T>} types
+below are \api{anyhow::Result<T>}. Complex types are from \api{num_complex}.
 \begin{lstlisting}
-use rdigital_rf::Reader;
-
-fn main() -> anyhow::Result<()> {
-    let mut r = Reader::open(["/archive/run-a", "/archive/run-b"])?;
-    if let Some((first, last)) = r.get_bounds("ch0")? {
-        let count = (last - first).min(1023) as usize + 1;
-        let iq = r.read_complex32(first, count, "ch0", 0)?;
-        println!("{} samples", iq.len());
-    }
-    Ok(())
+impl Reader {
+    pub fn open(roots: impl IntoIterator<Item = impl AsRef<Path>>)
+        -> Result<Self>;
+    pub fn channels(&self) -> Vec<&str>;
+    pub fn properties(&self, channel: &str) -> Result<&Properties>;
+    pub fn bounds(&mut self, channel: &str)
+        -> Result<Option<(u64, u64)>>;
+    pub fn get_bounds(&mut self, channel: &str)
+        -> Result<Option<(u64, u64)>>;
+    pub fn read(&mut self, channel: &str, samples: Range<u64>,
+        subchannel: usize) -> Result<Read>;
+    pub fn read_vector(&mut self, start: u64, length: usize,
+        channel: &str, subchannel: Option<usize>) -> Result<Vector>;
+    pub fn read_complex32(&mut self, start: u64, length: usize,
+        channel: &str, subchannel: usize) -> Result<Vec<Complex32>>;
+    pub fn set_cache_options(&mut self, options: CacheOptions)
+        -> Result<()>;
+    pub fn set_cache_byte_limit(&mut self, maximum_bytes: usize)
+        -> Result<()>;
+    pub fn cache_stats(&self) -> CacheStats;
+    pub fn clear_cache(&mut self);
 }
 \end{lstlisting}
-\api{Reader::open} accepts a recording root containing channel directories, a
-root containing \api{rf_data/}, or an individual channel directory. It discovers
-channel layouts at opening; it is not a directory-watching service. Channel
-names are directory names, such as \api{ch0}.
+\begin{itemize}
+\item \api{open}: roots may contain channel directories, contain \api{rf_data/},
+or be channel directories. Duplicate roots are deduplicated. Channels are
+discovered at open time; subsequent reads can find new files in those layouts.
+\item \api{bounds}, \api{get_bounds}: aliases returning inclusive first/last
+stored sample indices, or \api{None}. Gaps may occur between the bounds.
+\item \api{read}: half-open sample interval; returns available blocks and gaps.
+Empty intervals are accepted.
+\item Strict reads require positive length. Gaps return \api{MissingSamples}.
+\item Subchannels are zero-based. \api{Some(i)} selects one;
+\api{None} selects all in \api{read_vector}.
+\item \api{clear_cache}: closes cached files without rediscovering channels.
+Both cache setters clear the open-file cache.
+\end{itemize}
 
-\chapterpage{Bounded streaming reads}
-Use \api{read_complex32} for a contiguous vector of complex 32-bit floating-point
-samples. Its arguments are the absolute first sample, number of samples,
-channel name and zero-based subchannel. Integer sample values are widened
-without normalization; digital or analog gain calibration belongs to the caller.
-\lstinputlisting{../examples/stream_read.rs}
-The example accepts a recording root and optional channel name as command-line
-arguments. It requests at most 1024 samples and handles missing data separately
-from other errors. A later valid read remains possible after a gap error.
+\subsection*{Indices, values and errors}
+Indices are absolute \api{u64} sample counts from the Unix epoch. The rate is
+the numerator divided by the denominator in \api{Properties}.
+Sample values are returned without amplitude normalization. Real samples read
+as complex have zero imaginary parts.
 
-\textbf{Bounds are not a continuity guarantee.} Both \api{bounds} and
-\api{get_bounds} return \api{Option<(u64, u64)>}: inclusive first and last stored
-indices, or \api{None} if no finalized samples are found. Missing files or
-indexed gaps can occur between those indices. The strict methods report
-\api{MissingSamples}, whose \api{gaps} field contains half-open ranges.
+Unknown channels, invalid subchannels, reversed intervals, arithmetic overflow,
+malformed files and unsupported layouts return errors. Missing intervals are
+explicit; they are never filled. Same-name channels across roots must have
+compatible promoted format, rate, epoch and subchannel layout. Identical
+sample overlaps are accepted; conflicting overlaps return errors.
 
-\textbf{Cache limits are not output limits.} The example limits the number of
-open files and the HDF5 raw chunk cache per file. The requested output vector,
-conversion buffers, file metadata and OS page cache are additional memory.
-Bound each read length in a streaming application. Native complex i8/i16 HDF5
-samples use direct conversion to complex-f32; raw payloads bypass HDF5 sample
-conversion altogether.
+\clearpage
+\section*{Reader types}
+\begin{lstlisting}
+pub struct Properties {
+    pub sample_rate_numerator: u64,
+    pub sample_rate_denominator: u64,
+    pub num_subchannels: usize,
+    pub is_complex: bool,
+    pub epoch: String,
+    pub format: Format,
+}
+pub enum Format { Real32, Real64, Complex32, Complex64 }
+pub enum Samples {
+    Real32(Vec<f32>), Real64(Vec<f64>),
+    Complex32(Vec<Complex32>), Complex64(Vec<Complex64>),
+}
+pub struct Vector {
+    pub samples: Samples,
+    pub shape: Vec<usize>,
+}
+impl Vector {
+    pub fn into_complex64(self) -> Vec<Complex64>;
+}
+pub struct Read {
+    pub requested: Range<u64>,
+    pub blocks: Vec<SampleBlock>,
+    pub gaps: Vec<Range<u64>>,
+    pub sources: Vec<SourceSpan>,
+}
+pub struct SampleBlock { pub start: u64, pub data: Vec<Complex64> }
+pub struct SourceSpan { pub samples: Range<u64>, pub path: PathBuf }
+pub struct MissingSamples { pub gaps: Vec<Range<u64>> }
+impl Read {
+    pub fn is_complete(&self) -> bool;
+    pub fn into_contiguous(self) -> Result<Vec<Complex64>>;
+}
+\end{lstlisting}
+\api{Vector.shape} is \api{[length]} for one selected subchannel, or
+\api{[length, num_subchannels]} for multiple subchannels, in row-major order.
+A one-sample request selecting multiple subchannels is rejected.
+\api{Format} describes the promoted output type. Integers up to 16 bits and
+float32 promote to real/complex float32; larger supported components promote
+to real/complex float64.
 
-\chapterpage{Gap-aware reads and the sample model}
-Use \api{read} when processing available blocks is preferable to rejecting the
-whole request. It takes a half-open interval: \api{start..end} includes
-\api{start}, excludes \api{end}, and contains \api{end - start} samples.
-\lstinputlisting{../examples/gap_read.rs}
-The example accepts a root, start and end. Indices are unsigned integers, not
-floating-point timestamps. If the rational sample rate is $N/D$ samples per
-second, an index $s$ corresponds to $sD/N$ seconds after the Unix epoch.
-Keep absolute indices as \api{u64}; large indices cannot always be represented
-exactly as \api{f64}.
+\api{Read.blocks} are ordered by sample index. \api{gaps} and
+\api{SourceSpan.samples} are half-open ranges. \api{is_complete} tests whether
+the gap list is empty. \api{into_contiguous} returns samples for a complete
+selection, otherwise \api{MissingSamples}. Supported epoch:
+\api{1970-01-01T00:00:00Z}.
 
-\par\medskip
-\begin{tabularx}{\linewidth}{@{}lX@{}}\toprule
-Result & Meaning\\\midrule
-\api{Read.requested} & Requested half-open sample interval.\\
-\api{Read.blocks} & Ordered \api{SampleBlock}s, each with an absolute \api{start}
-and a \api{Vec<Complex64>} of available samples.\\
-\api{Read.gaps} & Exact half-open missing intervals; never filled with zeros.\\
-\api{Read.sources} & \api{SourceSpan}s with sample interval and source metadata-file path.\\
-\api{is_complete()} & True when no gaps are present.\\
-\api{into_contiguous()} & Concatenated samples for a complete request; otherwise
-an error containing \api{MissingSamples}.\\\bottomrule
+\subsection*{Cache types}
+\begin{lstlisting}
+pub struct CacheOptions {
+    pub minimum_bytes: usize, // default: 64 * 1024 * 1024
+    pub max_open_files: usize, // default: 8
+}
+pub struct CacheStats {
+    pub file_opens: u64,
+    pub file_hits: u64,
+    pub last_chunk_cache_bytes: usize,
+}
+\end{lstlisting}
+Both options must be positive. Without a byte ceiling, each HDF5 chunk cache
+is at least \api{minimum_bytes} and the logical dataset size.
+\api{set_cache_byte_limit} sets a positive per-file ceiling.
+Returned vectors and OS caches are outside this limit.
+\api{last_chunk_cache_bytes} reports HDF5 cache allocation.
+
+\clearpage
+\section*{Raw writer: \api{rdigital_rf::raw}}
+\begin{lstlisting}
+impl RawWriter {
+    pub fn create(channel: impl AsRef<Path>, options: Options)
+        -> Result<Self>;
+    pub fn write(&mut self, start: u64, bytes: &[u8]) -> Result<()>;
+    pub fn flush(&mut self) -> Result<()>;
+}
+pub enum Component { I8, I16, F32, F64 }
+impl Component { pub fn bytes(self) -> usize; }
+pub enum Container { Hdf5, Raw } // default: Hdf5
+\end{lstlisting}
+\api{create} requires a new channel directory and acquires an exclusive
+writer lock. \api{write} accepts interleaved little-endian bytes in
+(sample, subchannel, component) order; complex components are real then
+imaginary. \api{start} is the absolute index of the first sample.
+Forward gaps are indexed. Overlapping/backward writes, incomplete sample bytes
+and index overflows return errors.
+
+Cadence rollover finalizes the current chunk. \api{flush} finalizes a short
+chunk; no further writes to that cadence interval are allowed.
+Dropping the writer does not flush. There is no append/resume constructor.
+\api{Container} is a format label, not a writer factory.
+
+\subsection*{\api{Options} fields}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}\toprule
+Field & Type & Default\\\midrule
+\api{component} & \api{Component} & \api{I8}\\
+\api{complex} & \api{bool} & \api{true}\\
+\api{num_subchannels} & \api{usize} & 1\\
+\api{sample_rate_numerator} & \api{u64} & 25,000,000\\
+\api{sample_rate_denominator} & \api{u64} & 1\\
+\api{file_cadence_millisecs} & \api{u64} & 1000\\
+\api{subdir_cadence_secs} & \api{u64} & 3600\\
+\api{ring_files} & \api{Option<usize>} & \api{None}\\
+\api{durable} & \api{bool} & \api{false}\\\bottomrule
 \end{tabularx}
 
-\api{read_vector} returns \api{Vector { samples, shape }}. With \api{Some(i)},
-it selects one subchannel; \api{None} selects all in row-major order
-(sample, subchannel). One selected subchannel has shape \api{[length]}; multiple
-have shape \api{[length, num_subchannels]}. A one-sample, multiple-subchannel
-selection is rejected to match the tested upstream squeeze behavior.
-
-\api{Samples} contains \api{Real32}, \api{Real64}, \api{Complex32} or
-\api{Complex64} vectors. Small integer components (up to 16 bits) and float32
-promote to float32 or complex-f32; larger supported components promote to
-float64 or complex-f64. \api{Vector::into_complex64} provides a uniform complex
-representation, with zero imaginary parts for real recordings.
-
-\chapterpage{Reader reference}
-All fallible operations return \api{anyhow::Result<T>}. A malformed file,
-incompatible layout or conflicting overlap is an error, not an empty read.
-\par\medskip
-\begin{tabularx}{\linewidth}{@{}p{.47\linewidth}X@{}}\toprule
-Method & Result and behavior\\\midrule
-\api{Reader::open(roots)} & Discover channels across local roots; deduplicate
-identical root arguments. Automatically detect the container per chunk.\\[3pt]
-\api{channels()} & \api{Vec<&str>} of discovered channel names.\\[3pt]
-\api{properties(channel)} & Borrowed \api{Properties} for the channel.\\[3pt]
-\api{bounds(channel)}\newline
-\api{get_bounds(channel)} & Inclusive first/last stored indices; aliases. Inspect
-file indices rather than sample payloads.\\[3pt]
-\api{read(channel, range, subchannel)} & Gap-aware \api{Read}; half-open interval,
-including empty intervals.\\[3pt]
-\api{read_vector(start, length, channel, subchannel)} & Strict promoted
-\api{Vector}; optional subchannel. Positive length required.\\[3pt]
-\api{read_complex32(start, length, channel, subchannel)} & Strict
-\api{Vec<Complex32>}; one subchannel. Positive length required.\\[3pt]
-\api{set_cache_options(options)} & Set \api{CacheOptions} and clear open-file cache.\\[3pt]
-\api{set_cache_byte_limit(bytes)} & Positive ceiling on HDF5 raw chunk cache per
-file; clears open-file cache.\\[3pt]
-\api{cache_stats()} & \api{CacheStats}: opens, cache hits and last HDF5 chunk-cache size.\\[3pt]
-\api{clear_cache()} & Close cached file handles; keep discovered channels.\\\bottomrule
-\end{tabularx}
-
-\subsection*{Channel properties}
-\api{Properties} exposes \api{sample_rate_numerator},
-\api{sample_rate_denominator}, \api{num_subchannels}, \api{is_complex},
-\api{epoch} and \api{format}. \api{Format} describes the promoted output
-representation, not the original storage dtype. Rates are reduced to their
-rational form. The supported epoch is \api{1970-01-01T00:00:00Z}.
-
-\subsection*{Cache policy}
-\api{CacheOptions::default()} uses \api{minimum_bytes = 64 * 1024 * 1024} and
-\api{max_open_files = 8}. Both must be positive. Without a byte ceiling, an
-HDF5 cache is sized to at least the minimum and the full logical dataset size.
-This favors repeated sparse reads of compressed files but is not a total RAM
-budget. \api{CacheStats} contains \api{file_opens}, \api{file_hits} and
-\api{last_chunk_cache_bytes}; the last field describes HDF5 caching, not raw I/O.
-
-\subsection*{Multiple roots}
-Same-name channels must agree in promoted format, rate, epoch and subchannel
-layout. Identical overlapping samples are accepted; inconsistent values are
-rejected. The optimized streaming path falls back to the general overlap-aware
-reader where required. The same rules apply to mixed HDF5 and raw roots.
-
-\chapterpage{Writing an optional raw ring}
-Raw mode is selected by constructing \api{raw::RawWriter}; ordinary readers and
-recordings do not switch formats implicitly. This runnable example creates a
-disposable 50 MS/s complex-i8 channel, publishes four samples and reads them
-through the normal reader API. The example uses the development dependency
-\api{tempfile = "3"}; applications can supply their own new channel directory.
-\lstinputlisting{../examples/raw_ring.rs}
-\textbf{In an acquisition loop}, pass each actual received block with its
-absolute first sample index. Bytes are little-endian and interleaved in
-(sample, subchannel, component) order. Complex components are real then
-imaginary. For one complex-i8 channel, two bytes represent one sample. Forward
-gaps are allowed and indexed; overlapping or backward writes are rejected.
-Unaligned byte counts and sample-index overflows are errors.
-
-\textbf{Publication and flushing.} Crossing a file cadence finalizes the old
-chunk automatically. \api{flush()} explicitly finalizes a short current chunk;
-you cannot append to that cadence interval afterwards. Dropping the writer
-leaves the pending chunk unpublished. In a continuous loop, do not flush each
-hardware packet; let cadence rollover publish complete chunks, then flush once
-at a controlled stop.
-
-\chapterpage{Raw options, format and operational limits}
-\par\medskip
-\begin{tabularx}{\linewidth}{@{}p{.43\linewidth}lX@{}}\toprule
-\api{raw::Options} field & Default & Meaning\\\midrule
-\api{component} & \api{I8} & \api{I8}, \api{I16}, \api{F32} or \api{F64}.\\
-\api{complex} & \api{true} & Real/imaginary pairs; false for real samples.\\
-\api{num_subchannels} & 1 & Positive number of interleaved subchannels.\\
-\api{sample_rate_numerator} & 25,000,000 & Positive rational-rate numerator.\\
-\api{sample_rate_denominator} & 1 & Positive rational-rate denominator.\\
-\api{file_cadence_millisecs} & 1000 & Payload interval in milliseconds.\\
-\api{subdir_cadence_secs} & 3600 & Time-directory interval in seconds.\\
-\api{ring_files} & \api{None} & Retain archive; \api{Some(n)} keeps at most $n$ finalized chunks.\\
-\api{durable} & \api{false} & Sync payload, metadata and commit directory before returning.\\\bottomrule
-\end{tabularx}
-
-Cadences must be positive; file cadence must divide the subdirectory cadence
-and contain an integer number of samples. A ring size of zero is rejected.
-\api{raw::Container::default()} is \api{Hdf5}; \api{Raw} is the explicit
-alternative label. This enum is descriptive: it is not a writer factory.
-\api{Component::bytes()} returns component size in bytes.
+Rates, cadences and subchannel count must be positive. File cadence must divide
+the subdirectory cadence and contain an integer number of samples.
+\api{ring_files = Some(n)} retains at most $n$ finalized chunks; $n=0$ is invalid.
+Open reader handles may retain evicted files until cache eviction.
+\api{durable = true} syncs payload, metadata and the commit directory.
 
 \subsection*{Container version 1}
-The channel's \api{drf_properties.h5} contains ordinary rate/layout properties
-and \api{rdigital_rf_raw_version = 1}. Each finalized chunk has a binary payload
-\api{rf@SECONDS.MMM.raw} and an HDF5 sidecar \api{rf@SECONDS.MMM.h5} in the
-usual time directory. Version 1 defines little-endian row-major bytes, without
-sample scaling or compression. The sidecar stores:
+\api{drf_properties.h5} holds channel properties and
+\api{rdigital_rf_raw_version = 1}. Each chunk consists of
+\api{rf@SECONDS.MMM.raw} and \api{rf@SECONDS.MMM.h5} in a time directory.
+Payloads are uncompressed, little-endian, row-major bytes. The HDF5 sidecar has:
 \begin{itemize}
-\item Attributes \api{rdigital_rf_raw_version}, \api{raw_component} (1=i8,
-2=i16, 3=f32, 4=f64), \api{raw_is_complex}, \api{raw_num_subchannels} and \api{raw_rows}.
-\item Dataset \api{rf_data_index}, an unsigned 64-bit $(n,2)$ array of absolute
-sample starts and corresponding row offsets into the payload.
+\item Attributes: \api{rdigital_rf_raw_version}, \api{raw_component}
+(1=i8, 2=i16, 3=f32, 4=f64), \api{raw_is_complex},
+\api{raw_num_subchannels}, \api{raw_rows}.
+\item Dataset: \api{rf_data_index}, unsigned 64-bit shape $(n,2)$;
+columns are absolute sample start and payload row offset.
 \end{itemize}
-The payload is renamed into place first; the sidecar is published last as its
-commit marker. Readers ignore partial files and verify payload length and
-indices. No HDF5 sample dataset or per-sample HDF5 conversion is involved.
+The writer publishes the payload first and sidecar last. Readers use the
+sidecar as the commit marker and ignore partial files. Chunks are immutable.
+Pruning removes the sidecar before the payload.
 
-\subsection*{Ring lifetime and restart}
-Chunks are immutable; pruning unpublishes the oldest metadata first, then
-removes its payload. Open readers can retain an evicted inode until cache
-removal; a new reader sees it as missing. The bound concerns finalized chunks,
-not cached inodes or the pending chunk. At 50 MS/s, one complex-i8 channel
-produces 100 MB/s; 40 one-second chunks are about 4 GB before overhead.
+\subsection*{Supported scope}
+Local filesystems only. The raw extension is not supported by the upstream
+Python reader. Ordinary HDF5 writing, Digital Metadata and remote transports
+are not implemented. HDF5 live-writer/SWMR consistency is not guaranteed.
 
-One writer is allowed per channel. Version 1 requires a new channel directory;
-there is no append/resume constructor. After a crash, inspect the lock and
-partial files before starting in a new directory. A RAM ring normally uses
-\api{durable = false}; a timing benchmark of cached writes is not a durability
-or sustained-disk benchmark. Ordinary HDF5 live-writer/SWMR consistency is not
-guaranteed. The implementation currently excludes Digital Metadata, remote
-transports and full Python API compatibility.
-
-\smallskip
-\textbf{Validation and further reference.}
-Run \api{cargo test --all-targets}, \api{cargo test --doc} and
-\api{cargo fmt --all -- --check}. The tests include gaps, boundaries, numeric
-extremes, subchannels, mixed roots, partial chunks and ring eviction.
-The upstream Python comparison covers a tested HDF5 subset, not the raw
-extension. See \url{https://github.com/jvierine/rdigital_rf} and
-\url{https://github.com/MITHaystack/digital_rf}.
-
-\chapterpage{Benchmarks across reader and container options}
-These measurements compare eight configurations with two access patterns. All
-return the same complex-f32 values for a given stored component type, and every
-output was checked exactly. The table gives median elapsed milliseconds over
-five timed repeats, after one untimed warm-up. Lower is faster.
-
+\clearpage
+\section*{Read benchmarks}
+Median milliseconds from five repeats after one warm-up; Linux x86-64,
+Intel Core i9-11950H, ext4, warm OS cache. Returned-vector allocation is timed;
+fixture generation and exact-value checks are excluded.
 \par\medskip
 \input{benchmarks/table.tex}
 
-\textbf{Access patterns.} Each fixture contains 2,097,152 complex samples in
-one channel, one subchannel and one one-second interval. ``Full'' reads all
-samples in one request. ``Sparse'' reads 32 windows of 4096 samples, spaced
-65,536 samples apart: 131,072 samples in total. Compare configurations within
-one column; the two columns transfer different amounts of data.
+\begin{tabularx}{\linewidth}{@{}lX@{}}\toprule
+Setting & Value\\\midrule
+Full selection & 2,097,152 complex samples in one request.\\
+Sparse selection & 32 windows of 4096 samples, spaced 65,536 samples apart.\\
+Layout & One channel, one subchannel, one file; contiguous uncompressed HDF5.\\
+Compression & Gzip level 1; chunks of 65,536 complex-i8 samples.\\
+Cache & Default 64 MiB minimum, or 128 KiB per-file ceiling as indicated.\\
+Direct API & \api{read_complex32}.\\
+Vector API & \api{read_vector}, one subchannel, complex-f32 output.\\
+Signal & Deterministic compressible I/Q staircase; i16 values scaled by 256.\\\bottomrule
+\end{tabularx}
 
-\textbf{API and cache settings.} ``Direct'' means \api{read_complex32};
-``vector'' means \api{read_vector} with one subchannel and complex-f32 output,
-without an additional conversion to complex-f64. Uncompressed HDF5 datasets
-use contiguous storage. Gzip level 1 uses chunks of 65,536 complex-i8 samples.
-The default HDF5 cache has a 64 MiB minimum; the capped case sets a 128 KiB
-per-file ceiling. The same reader is retained across warm-up and timed repeats.
-
-\textbf{Data and hardware.} The synthetic I/Q components are deterministic,
-compressible staircase sequences in the signed 8-bit range. The i16 fixture
-multiplies those values by 256. The combined payload and metadata occupy about
-4.01 MiB for i8 HDF5 or raw, 8.01 MiB for i16, and 0.75 MiB for gzip-i8 HDF5.
-The benchmark ran on an Intel Core i9-11950H Linux x86-64 system with ext4 and a
-warmed OS page cache. Timing excludes fixture construction and correctness
-checks, but includes allocation of the returned vectors.
-
-\textbf{Interpretation.} Raw is about 2.8 times faster than the default gzip
-case for full reads here. Warm, contiguous, uncompressed HDF5 is about 6.3 times
-faster than raw for the same i8 selection. The direct API is about 8.9 times
-faster than the general vector API for that uncompressed HDF5 full read. A
-larger HDF5 cache improves repeated sparse compressed reads by about 2.7 times
-in this workload. Raw therefore does not provide a universal speed advantage;
-choose the container, API and cache policy using the intended access pattern.
-
-These are warm-cache read measurements, not sustained disk, acquisition,
-writer durability or end-to-end receiver throughput. Compressibility is
-synthetic and does not predict the size of radio-noise recordings. A separate
-40-million-sample read on DOB took 1.10 s from its HDF5 recording and 0.42 s
-from raw. That different recording, hardware and workload is not directly
-comparable with this table. Numerical reports retain every repeat, extrema,
-fixture size and correctness result; reproduce the matrix on the target system.
-% Reproduce with cargo run --release --example bench_features -- NEW_REPORT.h5.
-% Benchmark source and toolchain provenance are in the HDF5 report metadata.
+All outputs passed exact sample checks. These are cached read measurements;
+writer, disk-streaming and end-to-end receiver throughput were not measured.
+Compare configurations within a selection column.
+% Source identity, toolchain, individual timings and verification flags are
+% retained in docs/benchmarks/feature-matrix.h5. Table generation is documented
+% in docs/benchmarks/README.md.
 \end{document}

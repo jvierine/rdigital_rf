@@ -1,6 +1,6 @@
 .PHONY: all clean
 all: rdigital_rf-api.pdf
-rdigital_rf-api.pdf: rdigital_rf-api.tex benchmarks/table.tex ../examples/stream_read.rs ../examples/gap_read.rs ../examples/raw_ring.rs
+rdigital_rf-api.pdf: rdigital_rf-api.tex benchmarks/table.tex
 	pdflatex -interaction=nonstopmode -halt-on-error rdigital_rf-api.tex
 	pdflatex -interaction=nonstopmode -halt-on-error rdigital_rf-api.tex
 clean:
