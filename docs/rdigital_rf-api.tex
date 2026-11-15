@@ -11,6 +11,18 @@
 \setlength{\headheight}{14pt}
 \newcommand{\api}[1]{\texttt{\detokenize{#1}}}
 \begin{document}
+\section*{Digital RF}
+\href{https://github.com/MITHaystack/digital_rf}{Digital RF} is a file format
+and software library for recording and accessing sampled radio signals. It is
+intended for continuous receiver recordings, long-term archives and signal
+processing that reads selected time intervals. The standard format stores
+samples in HDF5 files organized by channel and time.
+
+Each channel records real or complex samples with a sample rate and absolute
+sample indices. The indices locate samples in time and preserve gaps in the
+recording. \api{rdigital_rf} implements access to these recordings in Rust and
+adds an optional raw binary container using the same reader API.
+
 \section*{Reader}
 Reads Digital RF 2.x HDF5 and the raw container. HDF5 is the default format;
 \api{Reader} detects the container automatically. All \api{Result<T>} types
