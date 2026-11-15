@@ -2,7 +2,7 @@
 name = "rdigital_rf"
 version = "0.1.0"
 edition = "2021"
-description = "Native Rust reader for multi-directory Digital RF archives"
+description = "Digital RF in Rust: HDF5 reader and optional raw binary ring container"
 license = "BSD-3-Clause"
 repository = "https://github.com/jvierine/rdigital_rf"
 readme = "README.md"
