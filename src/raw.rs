@@ -1,6 +1,6 @@
 //! Optional raw-container extension, version 1. Raw payloads are little-endian,
 //! row-major (sample, subchannel, component). HDF5 contains metadata only.
-use crate::{attr_u64, Complex64};
+use crate::{attr_u64, Sample, Scalar};
 use anyhow::{ensure, Context, Result};
 use hdf5::File;
 #[cfg(not(unix))]
@@ -41,14 +41,6 @@ impl Component {
             Self::I16 => 2,
             Self::F32 => 4,
             Self::F64 => 8,
-        }
-    }
-    fn value(self, b: &[u8]) -> f64 {
-        match self {
-            Self::I8 => (b[0] as i8) as f64,
-            Self::I16 => i16::from_le_bytes(b[..2].try_into().unwrap()) as f64,
-            Self::F32 => f32::from_le_bytes(b[..4].try_into().unwrap()) as f64,
-            Self::F64 => f64::from_le_bytes(b[..8].try_into().unwrap()),
         }
     }
 }
@@ -126,132 +118,159 @@ impl Chunk {
             rows,
         })
     }
-    fn read_values<T>(
+    pub fn append_typed<T: Sample>(
         &self,
         a: usize,
         b: usize,
-        ch: usize,
-        mut convert: impl FnMut(f64, f64) -> T,
-    ) -> Result<Vec<T>> {
+        selection: Option<usize>,
+        out: &mut Vec<T>,
+    ) -> Result<()> {
+        use hdf5::H5Type;
         ensure!(
-            a <= b && b as u64 <= self.rows && ch < self.ns,
+            a <= b && b as u64 <= self.rows && selection.is_none_or(|ch| ch < self.ns),
             "invalid raw selection"
         );
-        let nc = if self.complex { 2 } else { 1 };
-        let size = self.component.bytes();
-        let stride = self
-            .ns
-            .checked_mul(nc * size)
-            .context("raw stride overflow")?;
+        let desc = match self.component {
+            Component::I8 => i8::type_descriptor(),
+            Component::I16 => i16::type_descriptor(),
+            Component::F32 => f32::type_descriptor(),
+            Component::F64 => f64::type_descriptor(),
+        };
+        crate::typed::check::<T>(&desc, self.complex)?;
+        let width = self.component.bytes() * (if self.complex { 2 } else { 1 });
+        let mut stride = width.checked_mul(self.ns).context("raw stride overflow")?;
+        let n = (b - a)
+            .checked_mul(if selection.is_none() { self.ns } else { 1 })
+            .context("sample count overflow")?;
+        let ch = selection.unwrap_or(0);
+        let contiguous = selection.is_none() || self.ns == 1;
+        if n == 0 {
+            return Ok(());
+        }
         let offset = (a as u64)
             .checked_mul(stride as u64)
+            .and_then(|v| v.checked_add((ch * width) as u64))
             .context("raw offset overflow")?;
+        if selection.is_none() {
+            stride = width;
+        }
         let mut file = self.file.try_clone()?;
-        // Positional reads avoid a shared seek cursor between reader threads.
-        let mut out = Vec::with_capacity(b - a);
-        let chunk_rows = (1024 * 1024 / stride).max(1).min((b - a).max(1));
-        let mut buf = vec![
-            0u8;
-            chunk_rows
-                .checked_mul(stride)
-                .context("raw buffer overflow")?
-        ];
-        let mut row = 0;
-        while row < b - a {
-            let n = (b - a - row).min(chunk_rows);
-            let bytes = n * stride;
-            read_at(&mut file, &mut buf[..bytes], offset + (row * stride) as u64)?;
-            for r in buf[..bytes].chunks_exact(stride) {
-                let i = ch * nc * size;
-                let re = self.component.value(&r[i..]);
-                let im = if self.complex {
-                    self.component.value(&r[i + size..])
-                } else {
-                    0.
-                };
-                out.push(convert(re, im));
+        if cfg!(target_endian = "little")
+            && contiguous
+            && T::COMPLEX == self.complex
+            && T::Component::type_descriptor() == desc
+        {
+            ensure!(std::mem::size_of::<T>() == width, "sample layout mismatch");
+            out.try_reserve(n)?;
+            let len = out.len();
+            let bytes = n.checked_mul(width).context("raw byte size overflow")?;
+            // Sample is sealed to POD scalars and repr(C) pairs with no padding.
+            // All bit patterns are valid. Read into spare capacity, and expose
+            // initialized elements only after the entire read succeeds.
+            #[cfg(unix)]
+            unsafe {
+                read_uninit_at(&file, out.as_mut_ptr().add(len).cast::<u8>(), bytes, offset)?;
+                out.set_len(len + n);
             }
-            row += n;
+            #[cfg(not(unix))]
+            {
+                // The portable Read interface requires initialized storage.
+                // Initialize the result itself, without a separate buffer.
+                out.resize_with(len + n, T::zero);
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(out.as_mut_ptr().add(len).cast::<u8>(), bytes)
+                };
+                read_at(&mut file, dst, offset)?;
+            }
+            return Ok(());
         }
-        Ok(out)
-    }
-    fn packed32<const STRIDE: usize>(
-        &self,
-        a: usize,
-        b: usize,
-        convert: impl Fn(&[u8]) -> num_complex::Complex32,
-        out: &mut Vec<num_complex::Complex32>,
-    ) -> Result<()> {
-        ensure!(a <= b && b as u64 <= self.rows, "invalid raw selection");
-        let byte_count = (b - a)
-            .checked_mul(STRIDE)
-            .context("raw byte count overflow")?;
-        let offset = (a as u64)
-            .checked_mul(STRIDE as u64)
-            .context("raw offset overflow")?;
-        let mut bytes = vec![0u8; byte_count];
-        let mut file = self.file.try_clone()?;
-        read_at(&mut file, &mut bytes, offset)?;
-        out.extend(bytes.chunks_exact(STRIDE).map(convert));
-        Ok(())
-    }
-    pub fn append32(
-        &self,
-        a: usize,
-        b: usize,
-        ch: usize,
-        out: &mut Vec<num_complex::Complex32>,
-    ) -> Result<()> {
-        if self.ns == 1 && self.complex {
-            ensure!(ch == 0, "invalid raw subchannel");
-            use num_complex::Complex32 as Z;
-            return match self.component {
-                Component::I8 => {
-                    self.packed32::<2>(a, b, |v| Z::new(v[0] as i8 as f32, v[1] as i8 as f32), out)
+        let bytes = (n - 1)
+            .checked_mul(stride)
+            .and_then(|v| v.checked_add(width))
+            .context("raw byte size overflow")?;
+        let mut input = vec![0u8; bytes];
+        read_at(&mut file, &mut input, offset)?;
+        macro_rules! decode {
+            ($size:expr,$from:ident,$decode:expr) => {{
+                if contiguous && self.complex {
+                    out.extend(input.chunks_exact(2 * $size).map(|v| {
+                        T::pair(
+                            T::Component::$from(($decode)(&v[..$size])),
+                            T::Component::$from(($decode)(&v[$size..2 * $size])),
+                        )
+                    }));
+                } else if contiguous {
+                    out.extend(input.chunks_exact($size).map(|v| {
+                        T::pair(
+                            T::Component::$from(($decode)(v)),
+                            T::Component::scalar_zero(),
+                        )
+                    }));
+                } else {
+                    out.extend((0..n).map(|row| {
+                        let v = &input[row * stride..];
+                        let r = T::Component::$from(($decode)(&v[..$size]));
+                        let i = if self.complex {
+                            T::Component::$from(($decode)(&v[$size..2 * $size]))
+                        } else {
+                            T::Component::scalar_zero()
+                        };
+                        T::pair(r, i)
+                    }));
                 }
-                Component::I16 => self.packed32::<4>(
-                    a,
-                    b,
-                    |v| {
-                        Z::new(
-                            i16::from_le_bytes([v[0], v[1]]) as f32,
-                            i16::from_le_bytes([v[2], v[3]]) as f32,
-                        )
-                    },
-                    out,
-                ),
-                Component::F32 => self.packed32::<8>(
-                    a,
-                    b,
-                    |v| {
-                        Z::new(
-                            f32::from_le_bytes(v[..4].try_into().unwrap()),
-                            f32::from_le_bytes(v[4..].try_into().unwrap()),
-                        )
-                    },
-                    out,
-                ),
-                Component::F64 => self.packed32::<16>(
-                    a,
-                    b,
-                    |v| {
-                        Z::new(
-                            f64::from_le_bytes(v[..8].try_into().unwrap()) as f32,
-                            f64::from_le_bytes(v[8..].try_into().unwrap()) as f32,
-                        )
-                    },
-                    out,
-                ),
-            };
+            }};
         }
-        out.extend(self.read_values(a, b, ch, |r, i| {
-            num_complex::Complex32::new(r as f32, i as f32)
-        })?);
+        match self.component {
+            Component::I8 => decode!(1, i8, |v: &[u8]| v[0] as i8),
+            Component::I16 => decode!(2, i16, |v: &[u8]| i16::from_le_bytes(v.try_into().unwrap())),
+            Component::F32 => decode!(4, f32, |v: &[u8]| f32::from_le_bytes(v.try_into().unwrap())),
+            Component::F64 => decode!(8, f64, |v: &[u8]| f64::from_le_bytes(v.try_into().unwrap())),
+        }
         Ok(())
     }
-    pub fn read64(&self, a: usize, b: usize, ch: usize) -> Result<Vec<Complex64>> {
-        self.read_values(a, b, ch, Complex64::new)
+}
+// Read into reserved POD storage without creating references to uninitialized
+// u8 values. Only the caller marks samples initialized after complete success.
+#[cfg(unix)]
+unsafe fn read_uninit_at(
+    file: &fs::File,
+    dst: *mut u8,
+    bytes: usize,
+    offset: u64,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut done = 0;
+    while done < bytes {
+        let pos = offset
+            .checked_add(done as u64)
+            .and_then(|v| libc::off_t::try_from(v).ok())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "raw offset overflow")
+            })?;
+        let n = unsafe {
+            libc::pread(
+                file.as_raw_fd(),
+                dst.add(done).cast(),
+                (bytes - done).min(isize::MAX as usize),
+                pos,
+            )
+        };
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "incomplete raw payload",
+            ));
+        }
+        done += n as usize;
     }
+    Ok(())
 }
 #[cfg(unix)]
 fn read_at(file: &mut fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {

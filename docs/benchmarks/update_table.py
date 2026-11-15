@@ -11,6 +11,8 @@ CASES = [
     ('Raw', 'i8', 'direct', 'raw8_native'),
     ('Raw', 'i8', 'vector', 'raw8_vector'),
     ('Raw', 'i16', 'direct', 'raw16_native'),
+    ('HDF5, uncompressed', 'i8', 'i8', 'hdf8_i8_native'),
+    ('Raw', 'i8', 'i8', 'raw8_i8_native'),
 ]
 root = Path(__file__).resolve().parent
 lines = [r'% Numerical report and source provenance are retained in HDF5 metadata.',

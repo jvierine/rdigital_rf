@@ -263,6 +263,70 @@ fn audit(report: &File, root: &Path, bits: u32) -> Result<()> {
     }
     Ok(())
 }
+fn native_i8_cases(report: &File, root: &Path) -> Result<()> {
+    for source in ["hdf8", "raw8"] {
+        for sparse in [false, true] {
+            let mut r = Reader::open([root.join(source)])?;
+            let selections: Vec<_> = if sparse {
+                (0..32).map(|i| (i * 65536 + 1024, 4096)).collect()
+            } else {
+                vec![(0, N)]
+            };
+            let total: usize = selections.iter().map(|p| p.1).sum();
+            let mut times = vec![];
+            for rep in 0..=REPEATS {
+                let t = Instant::now();
+                let mut vectors = vec![];
+                for &(start, n) in &selections {
+                    vectors.push(
+                        r.read_vector_as::<rdigital_rf::Iq<i8>>(start as u64, n, "ch0", Some(0))?
+                            .samples,
+                    );
+                }
+                let elapsed = t.elapsed().as_secs_f64();
+                for (&(start, _), v) in selections.iter().zip(&vectors) {
+                    for (i, z) in v.iter().enumerate() {
+                        let (a, b) = value(start + i, 8);
+                        ensure!(z.r == a as i8 && z.i == b as i8, "typed i8 mismatch");
+                    }
+                }
+                if rep > 0 {
+                    times.push(elapsed);
+                }
+            }
+            let mut sorted = times.clone();
+            sorted.sort_by(f64::total_cmp);
+            let median = sorted[REPEATS / 2];
+            let name = format!(
+                "{source}_i8_native_{}",
+                if sparse { "sparse" } else { "contiguous" }
+            );
+            let g = report.create_group(&name)?;
+            g.new_dataset_builder()
+                .with_data(&times)
+                .create("seconds")?;
+            for (k, v) in [
+                ("median_seconds", median),
+                ("min_seconds", sorted[0]),
+                ("max_seconds", sorted[REPEATS - 1]),
+                ("million_samples_per_second", total as f64 / median / 1e6),
+            ] {
+                g.new_dataset::<f64>().create(k)?.write_scalar(&v)?;
+            }
+            for (k, v) in [
+                ("samples_per_repeat", total as u64),
+                ("stored_component_bits", 8),
+                ("returned_sample_bytes", 2),
+                ("fixture_bytes", disk_bytes(&root.join(source))?),
+                ("exact_equal", 1),
+            ] {
+                g.new_dataset::<u64>().create(k)?.write_scalar(&v)?;
+            }
+            println!("{name} median_ms={:.3} exact=true", median * 1000.);
+        }
+    }
+    Ok(())
+}
 fn main() -> Result<()> {
     let out = std::env::args()
         .nth(1)
@@ -363,6 +427,7 @@ fn main() -> Result<()> {
         }
     }
     text(&report,"control_method","Contiguous HDF5 payload offset resolved before timing. Both payload files read using identical seek/read_exact into preallocated buffers; alternating order. Identical conversion routine reuses one preallocated output. No HDF5 API call or allocation inside payload control timer.")?;
+    native_i8_cases(&report, tmp.path())?;
     audit(&report, tmp.path(), 8)?;
     audit(&report, tmp.path(), 16)?;
     report.flush()?;

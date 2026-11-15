@@ -26,9 +26,14 @@ adds an optional raw binary container using the same reader API.
 \section*{Reader}
 Reads Digital RF 2.x HDF5 and the raw container. HDF5 is the default format;
 \api{Reader} detects the container automatically. All \api{Result<T>} types
-below are \api{anyhow::Result<T>}. Complex types are from \api{num_complex}.
+below are \api{anyhow::Result<T>}. \api{C64} has two float32 components;
+\api{C128} has two float64 components.
 \begin{lstlisting}
 impl Reader {
+    pub fn read_vector_as<T: Sample>(&mut self, start: u64, length: usize,
+        channel: &str, subchannel: Option<usize>) -> Result<TypedVector<T>>;
+    pub fn read_as<T: Sample>(&mut self, channel: &str,
+        samples: Range<u64>, subchannel: usize) -> Result<Read<T>>;
     pub fn open(roots: impl IntoIterator<Item = impl AsRef<Path>>)
         -> Result<Self>;
     pub fn channels(&self) -> Vec<&str>;
@@ -42,7 +47,7 @@ impl Reader {
     pub fn read_vector(&mut self, start: u64, length: usize,
         channel: &str, subchannel: Option<usize>) -> Result<Vector>;
     pub fn read_complex32(&mut self, start: u64, length: usize,
-        channel: &str, subchannel: usize) -> Result<Vec<Complex32>>;
+        channel: &str, subchannel: usize) -> Result<Vec<C64>>;
     pub fn set_cache_options(&mut self, options: CacheOptions)
         -> Result<()>;
     pub fn set_cache_byte_limit(&mut self, maximum_bytes: usize)
@@ -57,9 +62,10 @@ or be channel directories. Duplicate roots are deduplicated. Channels are
 discovered at open time; subsequent reads can find new files in those layouts.
 \item \api{bounds}, \api{get_bounds}: aliases returning inclusive first/last
 stored sample indices, or \api{None}. Gaps may occur between the bounds.
-\item \api{read}: half-open sample interval; returns available blocks and gaps.
-Empty intervals are accepted.
-\item Strict reads require positive length. Gaps return \api{MissingSamples}.
+\item \api{read_as<T>}: typed available blocks and gaps over a half-open interval.
+Empty intervals are accepted. \api{read} returns \api{Read<C128>}.
+\item \api{read_vector_as<T>}: contiguous output in type \api{T}. Positive length
+is required; gaps return \api{MissingSamples}.
 \item Subchannels are zero-based. \api{Some(i)} selects one;
 \api{None} selects all in \api{read_vector}.
 \item \api{clear_cache}: closes cached files without rediscovering channels.
@@ -81,6 +87,10 @@ sample overlaps are accepted; conflicting overlaps return errors.
 \clearpage
 \section*{Reader types}
 \begin{lstlisting}
+pub type C64 = num_complex::Complex<f32>;
+pub type C128 = num_complex::Complex<f64>;
+#[repr(C)] pub struct Iq<T> { pub r: T, pub i: T }
+pub struct TypedVector<T> { pub samples: Vec<T>, pub shape: Vec<usize> }
 pub struct Properties {
     pub sample_rate_numerator: u64,
     pub sample_rate_denominator: u64,
@@ -92,33 +102,42 @@ pub struct Properties {
 pub enum Format { Real32, Real64, Complex32, Complex64 }
 pub enum Samples {
     Real32(Vec<f32>), Real64(Vec<f64>),
-    Complex32(Vec<Complex32>), Complex64(Vec<Complex64>),
+    Complex32(Vec<C64>), Complex64(Vec<C128>),
 }
 pub struct Vector {
     pub samples: Samples,
     pub shape: Vec<usize>,
 }
 impl Vector {
-    pub fn into_complex64(self) -> Vec<Complex64>;
+    pub fn into_complex64(self) -> Vec<C128>;
 }
-pub struct Read {
+pub struct Read<T = C128> {
     pub requested: Range<u64>,
-    pub blocks: Vec<SampleBlock>,
+    pub blocks: Vec<SampleBlock<T>>,
     pub gaps: Vec<Range<u64>>,
     pub sources: Vec<SourceSpan>,
 }
-pub struct SampleBlock { pub start: u64, pub data: Vec<Complex64> }
+pub struct SampleBlock<T = C128> { pub start: u64, pub data: Vec<T> }
 pub struct SourceSpan { pub samples: Range<u64>, pub path: PathBuf }
 pub struct MissingSamples { pub gaps: Vec<Range<u64>> }
-impl Read {
+impl<T> Read<T> {
     pub fn is_complete(&self) -> bool;
-    pub fn into_contiguous(self) -> Result<Vec<Complex64>>;
+    pub fn into_contiguous(self) -> Result<Vec<T>>;
 }
 \end{lstlisting}
-\api{Vector.shape} is \api{[length]} for one selected subchannel, or
+Supported outputs: scalar i8/u8/i16/u16/i32/u32/i64/u64/f32/f64,
+\api{Iq<S>} with a scalar component, \api{C64} or \api{C128}. Integer outputs require the stored component type to
+match; unsupported conversions return errors. Floating outputs convert directly
+to the requested component precision. No float64 intermediate is used.
+Native contiguous raw reads fill the result directly on little-endian
+hosts, including all-subchannel selections. Converted/strided reads allocate the byte span required by the selection.
+
+The shape is \api{[length]} for one selected subchannel, or
 \api{[length, num_subchannels]} for multiple subchannels, in row-major order.
-A one-sample request selecting multiple subchannels is rejected.
-\api{Format} describes the promoted output type. Integers up to 16 bits and
+The compatibility \api{read_vector} rejects one-sample, multiple-subchannel
+requests; \api{read_vector_as<T>} accepts them.
+\api{Format} describes the compatibility \api{read_vector} output.
+Typed reads use \api{T}. Integers up to 16 bits and
 float32 promote to real/complex float32; larger supported components promote
 to real/complex float64.
 
@@ -130,17 +149,15 @@ selection, otherwise \api{MissingSamples}. Supported epoch:
 
 \subsection*{Cache types}
 \begin{lstlisting}
-pub struct CacheOptions {
-    pub minimum_bytes: usize, // default: 64 * 1024 * 1024
-    pub max_open_files: usize, // default: 8
-}
+pub struct CacheOptions { pub minimum_bytes: usize, pub max_open_files: usize }
 pub struct CacheStats {
     pub file_opens: u64,
     pub file_hits: u64,
     pub last_chunk_cache_bytes: usize,
 }
 \end{lstlisting}
-Both options must be positive. Without a byte ceiling, each HDF5 chunk cache
+Defaults: 64 MiB minimum cache size and 8 open files.
+Both must be positive. Without a byte ceiling, each HDF5 chunk cache
 is at least \api{minimum_bytes} and the logical dataset size.
 \api{set_cache_byte_limit} sets a positive per-file ceiling.
 Result buffers, conversion buffers and OS caches are outside this limit.
@@ -229,6 +246,7 @@ Compression & Gzip level 1; chunks of 65,536 complex-i8 samples.\\
 Cache & Default 64 MiB minimum, or 128 KiB per-file ceiling as indicated.\\
 Direct API & \api{read_complex32}.\\
 Vector API & \api{read_vector}, one subchannel, complex-f32 output.\\
+i8 API & \api{read_vector_as::<Iq<i8>>}, two i8 components per sample.\\
 Signal & Deterministic compressible I/Q staircase; i16 values scaled by 256.\\\bottomrule
 \end{tabularx}
 

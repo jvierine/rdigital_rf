@@ -1,6 +1,6 @@
 # Read benchmarks
 
-Eight configurations, two access patterns: HDF5/raw, i8/i16, direct/vector APIs,
+Ten configurations, two access patterns: HDF5/raw, i8/i16, direct/vector APIs,
 gzip, and default/capped HDF5 caches. Results are in `feature-matrix.h5`.
 
 ```sh
@@ -15,7 +15,8 @@ The output path must be new. Fixtures are temporary; the HDF5 report is retained
 - Sparse selection: 32 windows of 4096 samples, spaced 65,536 samples apart.
 - One warm-up, five timed repeats, same reader, warm OS cache.
 - Direct API: `read_complex32`. Vector API: `read_vector`, one subchannel,
-  complex32 output.
+  complex32 output. Native-i8 cases use `read_vector_as::<Iq<i8>>` and return
+  two signed bytes per sample.
 - Timers include reads and returned-vector allocation. Exact-value checks run
   outside the timer. All outputs must match.
 - Signal: deterministic compressible I/Q staircase; i16 values scaled by 256.

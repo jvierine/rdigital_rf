@@ -4,9 +4,15 @@
 //! HDF5 remains the default; an explicit raw-container extension is also supported.
 #![doc = include_str!("../README.md")]
 pub mod raw;
+mod typed;
+pub use typed::{Iq, Sample, Scalar, TypedVector};
+/// Complex64: two float32 components.
+pub type C64 = num_complex::Complex32;
+/// Complex128: two float64 components.
+pub type C128 = num_complex::Complex64;
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
-use hdf5::{Dataset, File, H5Type};
+use hdf5::{Dataset, File};
 use num_complex::Complex64;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -15,60 +21,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct ComplexValue {
-    r: f64,
-    i: f64,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ComplexI8 {
-    r: i8,
-    i: i8,
-}
-unsafe impl H5Type for ComplexI8 {
-    fn type_descriptor() -> hdf5::types::TypeDescriptor {
-        use hdf5::types::{CompoundField, CompoundType, TypeDescriptor};
-        TypeDescriptor::Compound(CompoundType {
-            fields: vec![
-                CompoundField::typed::<i8>("r", 0, 0),
-                CompoundField::typed::<i8>("i", 1, 1),
-            ],
-            size: 2,
-        })
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ComplexI16 {
-    r: i16,
-    i: i16,
-}
-unsafe impl H5Type for ComplexI16 {
-    fn type_descriptor() -> hdf5::types::TypeDescriptor {
-        use hdf5::types::{CompoundField, CompoundType, TypeDescriptor};
-        TypeDescriptor::Compound(CompoundType {
-            fields: vec![
-                CompoundField::typed::<i16>("r", 0, 0),
-                CompoundField::typed::<i16>("i", 2, 1),
-            ],
-            size: 4,
-        })
-    }
-}
-unsafe impl H5Type for ComplexValue {
-    fn type_descriptor() -> hdf5::types::TypeDescriptor {
-        use hdf5::types::{CompoundField, CompoundType, TypeDescriptor};
-        TypeDescriptor::Compound(CompoundType {
-            fields: vec![
-                CompoundField::typed::<f64>("r", 0, 0),
-                CompoundField::typed::<f64>("i", 8, 1),
-            ],
-            size: 16,
-        })
-    }
-}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Properties {
     pub sample_rate_numerator: u64,
@@ -149,8 +101,6 @@ struct Cached {
     raw: Option<raw::Chunk>,
     index: Vec<(u64, u64)>,
     rows: u64,
-    native_i16: bool,
-    native_i8: bool,
 }
 #[derive(Clone, Debug)]
 pub struct SourceSpan {
@@ -158,9 +108,9 @@ pub struct SourceSpan {
     pub path: PathBuf,
 }
 #[derive(Clone, Debug)]
-pub struct SampleBlock {
+pub struct SampleBlock<T = Complex64> {
     pub start: u64,
-    pub data: Vec<Complex64>,
+    pub data: Vec<T>,
 }
 #[derive(Debug)]
 pub struct MissingSamples {
@@ -173,17 +123,17 @@ impl std::fmt::Display for MissingSamples {
 }
 impl std::error::Error for MissingSamples {}
 #[derive(Clone, Debug)]
-pub struct Read {
+pub struct Read<T = Complex64> {
     pub requested: Range<u64>,
-    pub blocks: Vec<SampleBlock>,
+    pub blocks: Vec<SampleBlock<T>>,
     pub gaps: Vec<Range<u64>>,
     pub sources: Vec<SourceSpan>,
 }
-impl Read {
+impl<T> Read<T> {
     pub fn is_complete(&self) -> bool {
         self.gaps.is_empty()
     }
-    pub fn into_contiguous(self) -> Result<Vec<Complex64>> {
+    pub fn into_contiguous(self) -> Result<Vec<T>> {
         if !self.gaps.is_empty() {
             return Err(MissingSamples { gaps: self.gaps }.into());
         }
@@ -379,60 +329,92 @@ impl Reader {
             length > 0,
             "Number of samples requested must be greater than 0"
         );
+        let p = self.properties(channel)?;
+        ensure!(
+            length != 1 || subchannel.is_some() || p.num_subchannels == 1,
+            "Requested 1 samples, but got {} after squeeze",
+            p.num_subchannels
+        );
+        let format = p.format;
+        macro_rules! get {
+            ($t:ty,$variant:ident) => {{
+                let v = self.read_vector_as::<$t>(start, length, channel, subchannel)?;
+                Ok(Vector {
+                    samples: Samples::$variant(v.samples),
+                    shape: v.shape,
+                })
+            }};
+        }
+        match format {
+            Format::Real32 => get!(f32, Real32),
+            Format::Real64 => get!(f64, Real64),
+            Format::Complex32 => get!(num_complex::Complex32, Complex32),
+            Format::Complex64 => get!(Complex64, Complex64),
+        }
+    }
+    /// Read exactly the requested sample representation; no float64 staging.
+    pub fn read_vector_as<T: Sample>(
+        &mut self,
+        start: u64,
+        length: usize,
+        channel: &str,
+        subchannel: Option<usize>,
+    ) -> Result<TypedVector<T>> {
+        ensure!(
+            length > 0,
+            "Number of samples requested must be greater than 0"
+        );
         let end = start
             .checked_add(u64::try_from(length)?)
-            .context("vector sample overflow")?;
+            .context("sample overflow")?;
         let p = self.properties(channel)?.clone();
-        let channels: Vec<_> =
+        let columns: Vec<_> =
             subchannel.map_or_else(|| (0..p.num_subchannels).collect(), |s| vec![s]);
         ensure!(
-            channels.iter().all(|&c| c < p.num_subchannels),
+            columns.iter().all(|&s| s < p.num_subchannels),
             "invalid subchannel"
         );
-        // Match the upstream squeeze/length check, including the single-row,
-        // multiple-subchannel case rejected by its read_vector_raw implementation.
-        ensure!(
-            length != 1 || channels.len() == 1,
-            "Requested 1 samples, but got {} after squeeze",
-            channels.len()
-        );
-        let columns: Vec<_> = channels
-            .iter()
-            .map(|&c| self.read(channel, start..end, c)?.into_contiguous())
-            .collect::<Result<_>>()?;
+        if columns.len() == 1 {
+            let samples = if let Some(v) =
+                self.read_contiguous_as::<T>(channel, start..end, Some(columns[0]))?
+            {
+                v
+            } else {
+                self.read_as::<T>(channel, start..end, columns[0])?
+                    .into_contiguous()?
+            };
+            return Ok(TypedVector {
+                samples,
+                shape: vec![length],
+            });
+        }
+        if let Some(samples) = self.read_contiguous_as::<T>(channel, start..end, None)? {
+            return Ok(TypedVector {
+                samples,
+                shape: vec![length, columns.len()],
+            });
+        }
         let size = length
             .checked_mul(columns.len())
-            .context("vector allocation overflow")?;
-        let mut values = Vec::with_capacity(size);
-        for row in 0..length {
-            for column in &columns {
-                values.push(column[row]);
+            .context("vector size overflow")?;
+        let mut out = vec![T::zero(); size];
+        for (c, &ch) in columns.iter().enumerate() {
+            let v = self
+                .read_vector_as::<T>(start, length, channel, Some(ch))?
+                .samples;
+            for (row, value) in v.into_iter().enumerate() {
+                out[row * columns.len() + c] = value;
             }
         }
-        let shape = if channels.len() == 1 {
-            vec![length]
-        } else {
-            vec![length, channels.len()]
-        };
-        let samples = match p.format {
-            Format::Real32 => Samples::Real32(values.iter().map(|z| z.re as f32).collect()),
-            Format::Real64 => Samples::Real64(values.iter().map(|z| z.re).collect()),
-            Format::Complex32 => Samples::Complex32(
-                values
-                    .iter()
-                    .map(|z| num_complex::Complex32::new(z.re as f32, z.im as f32))
-                    .collect(),
-            ),
-            Format::Complex64 => Samples::Complex64(values),
-        };
-        Ok(Vector { samples, shape })
+        Ok(TypedVector {
+            samples: out,
+            shape: vec![length, columns.len()],
+        })
     }
     pub fn channels(&self) -> Vec<&str> {
         self.channels.keys().map(String::as_str).collect()
     }
-    /// Strict single-subchannel complex-f32 read for streaming DSP. This avoids
-    /// the row-major/intermediate-column copy used by the polymorphic vector API.
-    /// Missing samples keep exactly the same error semantics as `read_vector`.
+    /// Compatibility alias for `read_vector_as::<C64>` with one subchannel.
     pub fn read_complex32(
         &mut self,
         start: u64,
@@ -440,38 +422,25 @@ impl Reader {
         channel: &str,
         subchannel: usize,
     ) -> Result<Vec<num_complex::Complex32>> {
-        ensure!(length > 0, "empty sample request");
-        let end = start
-            .checked_add(u64::try_from(length)?)
-            .context("sample overflow")?;
-        if let Some(values) = self.read_native_integer(channel, start..end, subchannel)? {
-            return Ok(values);
-        }
-        let samples = self
-            .read(channel, start..end, subchannel)?
-            .into_contiguous()?;
-        Ok(samples
-            .into_iter()
-            .map(|z| num_complex::Complex32::new(z.re as f32, z.im as f32))
-            .collect())
+        Ok(self
+            .read_vector_as::<num_complex::Complex32>(start, length, channel, Some(subchannel))?
+            .samples)
     }
-    // Common streaming path: copy stored signed i8/i16 I/Q straight to complex-f32.
-    // Other formats and overlapping roots retain the fully general reader.
-    fn read_native_integer(
+    fn read_contiguous_as<T: Sample>(
         &mut self,
         channel: &str,
         range: Range<u64>,
-        subchannel: usize,
-    ) -> Result<Option<Vec<num_complex::Complex32>>> {
+        subchannel: Option<usize>,
+    ) -> Result<Option<Vec<T>>> {
         let c = self
             .channels
             .get(channel)
             .context("unknown DigitalRF channel")?;
         ensure!(
-            subchannel < c.properties.num_subchannels,
+            subchannel.is_none_or(|ch| ch < c.properties.num_subchannels),
             "invalid subchannel"
         );
-        if c.locations.len() != 1 || !c.properties.is_complex {
+        if c.locations.len() != 1 {
             return Ok(None);
         }
         let location = c.locations[0].clone();
@@ -481,13 +450,20 @@ impl Reader {
                 u128::from(s)
                     .checked_mul(u128::from(rate.sample_rate_denominator))
                     .and_then(|n| n.checked_mul(1000))
-                    .context("timestamp overflow")?
+                    .context("sample timestamp arithmetic overflow")?
                     / u128::from(rate.sample_rate_numerator),
             )?)
         };
         let mut ms = millis(range.start)? / location.file_ms * location.file_ms;
         let last = millis(range.end - 1)? / location.file_ms * location.file_ms;
-        let mut values = Vec::with_capacity(usize::try_from(range.end - range.start)?);
+        let count = usize::try_from(range.end - range.start)?
+            .checked_mul(if subchannel.is_none() {
+                rate.num_subchannels
+            } else {
+                1
+            })
+            .context("vector size overflow")?;
+        let mut values = Vec::with_capacity(count);
         let mut cursor = range.start;
         let mut gaps = Vec::new();
         loop {
@@ -499,9 +475,6 @@ impl Reader {
                 .join(date.format("%Y-%m-%dT%H-%M-%S").to_string())
                 .join(format!("rf@{}.{:03}.h5", ms / 1000, ms % 1000));
             if let Some(f) = self.file(&path, rate.num_subchannels)? {
-                if f.raw.is_none() && !f.native_i16 && !f.native_i8 {
-                    return Ok(None);
-                }
                 for (i, &(start, offset)) in f.index.iter().enumerate() {
                     let stop = start + (f.index.get(i + 1).map_or(f.rows, |p| p.1) - offset);
                     let lo = start.max(range.start);
@@ -517,31 +490,7 @@ impl Reader {
                     }
                     let a = usize::try_from(offset + lo - start)?;
                     let b = usize::try_from(offset + hi - start)?;
-                    if let Some(raw) = &f.raw {
-                        raw.append32(a, b, subchannel, &mut values)?;
-                    } else if f.native_i8 {
-                        let stored = f
-                            .data
-                            .as_ref()
-                            .unwrap()
-                            .read_slice_1d::<ComplexI8, _>((a..b, subchannel))?;
-                        values.extend(
-                            stored.iter().map(|z| {
-                                num_complex::Complex32::new(f32::from(z.r), f32::from(z.i))
-                            }),
-                        );
-                    } else {
-                        let stored = f
-                            .data
-                            .as_ref()
-                            .unwrap()
-                            .read_slice_1d::<ComplexI16, _>((a..b, subchannel))?;
-                        values.extend(
-                            stored.iter().map(|z| {
-                                num_complex::Complex32::new(f32::from(z.r), f32::from(z.i))
-                            }),
-                        );
-                    }
+                    f.append_selection::<T>(a, b, subchannel, rate.is_complex, &mut values)?;
                     cursor = hi;
                 }
             }
@@ -607,8 +556,6 @@ impl Reader {
                 raw: Some(raw),
                 index,
                 rows,
-                native_i16: false,
-                native_i8: false,
             });
             while self.cache.len() > self.cache_files {
                 self.cache.pop_front();
@@ -678,28 +625,6 @@ impl Reader {
                 ensure!(stop <= next.0, "overlapping rf_data_index blocks");
             }
         }
-        let native_i16 = match data.dtype()?.to_descriptor()? {
-            hdf5::types::TypeDescriptor::Compound(c) => {
-                c.fields.len() == 2
-                    && c.fields.iter().all(|f| {
-                        (f.name == "r" || f.name == "i")
-                            && f.ty
-                                == hdf5::types::TypeDescriptor::Integer(hdf5::types::IntSize::U2)
-                    })
-            }
-            _ => false,
-        };
-        let native_i8 = match data.dtype()?.to_descriptor()? {
-            hdf5::types::TypeDescriptor::Compound(c) => {
-                c.fields.len() == 2
-                    && c.fields.iter().all(|f| {
-                        (f.name == "r" || f.name == "i")
-                            && f.ty
-                                == hdf5::types::TypeDescriptor::Integer(hdf5::types::IntSize::U1)
-                    })
-            }
-            _ => false,
-        };
         self.cache.push_back(Cached {
             path: path.to_owned(),
             _file: h,
@@ -707,8 +632,6 @@ impl Reader {
             raw: None,
             index,
             rows,
-            native_i16,
-            native_i8,
         });
         while self.cache.len() > self.cache_files {
             self.cache.pop_front();
@@ -718,6 +641,14 @@ impl Reader {
     /// Half-open global sample range. File cadence guides lookup; rf_data_index
     /// is authoritative for block boundaries and gaps inside each HDF5 file.
     pub fn read(&mut self, channel: &str, samples: Range<u64>, subchannel: usize) -> Result<Read> {
+        self.read_as::<Complex64>(channel, samples, subchannel)
+    }
+    pub fn read_as<T: Sample>(
+        &mut self,
+        channel: &str,
+        samples: Range<u64>,
+        subchannel: usize,
+    ) -> Result<Read<T>> {
         ensure!(samples.start <= samples.end, "reversed sample interval");
         let c = self
             .channels
@@ -726,7 +657,7 @@ impl Reader {
         let p = c.properties.clone();
         let locations = c.locations.clone();
         ensure!(subchannel < p.num_subchannels, "invalid subchannel");
-        let mut pieces: Vec<SampleBlock> = Vec::new();
+        let mut pieces: Vec<SampleBlock<T>> = Vec::new();
         let mut sources = Vec::new();
         if !samples.is_empty() {
             let millis = |s: u64| -> Result<u64> {
@@ -761,41 +692,8 @@ impl Reader {
                             }
                             let a = usize::try_from(offset + lo - start)?;
                             let b = usize::try_from(offset + hi - start)?;
-                            let data = if let Some(raw) = &f.raw {
-                                raw.read64(a, b, subchannel)?
-                            } else if p.is_complex && f.native_i16 {
-                                f.data
-                                    .as_ref()
-                                    .unwrap()
-                                    .read_slice_1d::<ComplexI16, _>((a..b, subchannel))?
-                                    .iter()
-                                    .map(|z| Complex64::new(f64::from(z.r), f64::from(z.i)))
-                                    .collect()
-                            } else if p.is_complex && f.native_i8 {
-                                f.data
-                                    .as_ref()
-                                    .unwrap()
-                                    .read_slice_1d::<ComplexI8, _>((a..b, subchannel))?
-                                    .iter()
-                                    .map(|z| Complex64::new(f64::from(z.r), f64::from(z.i)))
-                                    .collect()
-                            } else if p.is_complex {
-                                f.data
-                                    .as_ref()
-                                    .unwrap()
-                                    .read_slice_1d::<ComplexValue, _>((a..b, subchannel))?
-                                    .iter()
-                                    .map(|z| Complex64::new(z.r, z.i))
-                                    .collect()
-                            } else {
-                                f.data
-                                    .as_ref()
-                                    .unwrap()
-                                    .read_slice_1d::<f64, _>((a..b, subchannel))?
-                                    .iter()
-                                    .map(|x| Complex64::new(*x, 0.))
-                                    .collect()
-                            };
+                            let mut data = Vec::with_capacity(b - a);
+                            f.append::<T>(a, b, subchannel, p.is_complex, &mut data)?;
                             pieces.push(SampleBlock { start: lo, data });
                             sources.push(SourceSpan {
                                 samples: lo..hi,
@@ -814,7 +712,7 @@ impl Reader {
             }
         }
         pieces.sort_by_key(|b| b.start);
-        let mut blocks: Vec<SampleBlock> = Vec::new();
+        let mut blocks: Vec<SampleBlock<T>> = Vec::new();
         for piece in pieces {
             if let Some(last) = blocks.last_mut() {
                 let end = last.start + last.data.len() as u64;
@@ -825,8 +723,7 @@ impl Reader {
                         last.data[position..position + overlap]
                             .iter()
                             .zip(&piece.data[..overlap])
-                            .all(|(a, b)| a.re.to_bits() == b.re.to_bits()
-                                && a.im.to_bits() == b.im.to_bits()),
+                            .all(|(a, b)| T::same(*a, *b)),
                         "conflicting DigitalRF overlap at sample {}",
                         piece.start
                     );

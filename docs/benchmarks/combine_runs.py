@@ -13,6 +13,7 @@ with h5py.File(root/'feature-matrix.h5','w') as out:
  out.attrs['repeats']=15
  out.attrs['benchmark_source_sha256']=hashlib.sha256((repo/'examples/bench_features.rs').read_bytes()).hexdigest()
  out.attrs['raw_source_sha256']=hashlib.sha256((repo/'src/raw.rs').read_bytes()).hexdigest()
+ out.attrs['typed_source_sha256']=hashlib.sha256((repo/'src/typed.rs').read_bytes()).hexdigest()
  out.attrs['reader_source_sha256']=hashlib.sha256((repo/'src/lib.rs').read_bytes()).hexdigest()
  with h5py.File(paths[0]) as first: keys=list(first)
  for key in keys:

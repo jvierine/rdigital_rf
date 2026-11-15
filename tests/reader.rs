@@ -450,3 +450,29 @@ fn raw_container_matches_hdf5_for_multichannel_gapped_vectors() {
         a.read_vector(2, 3, "ch", None).unwrap().into_complex64()
     );
 }
+
+#[test]
+fn typed_hdf5_complex_integer_reads_preserve_storage_type() {
+    use rdigital_rf::Iq;
+    let d = tempfile::tempdir().unwrap();
+    let ch = properties(d.path(), 10, 1, 2);
+    file(&ch, 0, &[[0, 0]], &[-30000, 127, 30000], 2);
+    let mut r = Reader::open([d.path()]).unwrap();
+    let v = r.read_vector_as::<Iq<i16>>(0, 3, "ch", None).unwrap();
+    assert_eq!(v.shape, vec![3, 2]);
+    assert_eq!(
+        v.samples[0],
+        Iq {
+            r: -30000,
+            i: 30000
+        }
+    );
+    assert_eq!(
+        v.samples[1],
+        Iq {
+            r: -29000,
+            i: 30000
+        }
+    );
+    assert!(r.read_vector_as::<Iq<i8>>(0, 3, "ch", Some(0)).is_err());
+}
