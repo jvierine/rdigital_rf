@@ -1,6 +1,6 @@
 .PHONY: all clean
 all: rdigital_rf-api.pdf
-rdigital_rf-api.pdf: rdigital_rf-api.tex benchmarks/table.tex
+rdigital_rf-api.pdf: rdigital_rf-api.tex benchmarks/table.tex benchmarks/control-table.tex
 	pdflatex -interaction=nonstopmode -halt-on-error rdigital_rf-api.tex
 	pdflatex -interaction=nonstopmode -halt-on-error rdigital_rf-api.tex
 clean:

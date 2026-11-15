@@ -518,7 +518,7 @@ impl Reader {
                     let a = usize::try_from(offset + lo - start)?;
                     let b = usize::try_from(offset + hi - start)?;
                     if let Some(raw) = &f.raw {
-                        values.extend(raw.read32(a, b, subchannel)?);
+                        raw.append32(a, b, subchannel, &mut values)?;
                     } else if f.native_i8 {
                         let stored = f
                             .data

@@ -131,7 +131,7 @@ pub struct CacheStats {
 Both options must be positive. Without a byte ceiling, each HDF5 chunk cache
 is at least \api{minimum_bytes} and the logical dataset size.
 \api{set_cache_byte_limit} sets a positive per-file ceiling.
-Returned vectors and OS caches are outside this limit.
+Result buffers, conversion buffers and OS caches are outside this limit.
 \api{last_chunk_cache_bytes} reports HDF5 cache allocation.
 
 \clearpage
@@ -201,8 +201,8 @@ Python reader. Ordinary HDF5 writing, Digital Metadata and remote transports
 are not implemented. HDF5 live-writer/SWMR consistency is not guaranteed.
 
 \clearpage
-\section*{Read benchmarks}
-Median milliseconds from five repeats after one warm-up; Linux x86-64,
+\section*{Read API timings}
+Median milliseconds from 15 repeats in three processes, each with one warm-up; Linux x86-64,
 Intel Core i9-11950H, ext4, warm OS cache. Returned-vector allocation is timed;
 fixture generation and exact-value checks are excluded.
 \par\medskip
@@ -220,9 +220,17 @@ Vector API & \api{read_vector}, one subchannel, complex-f32 output.\\
 Signal & Deterministic compressible I/Q staircase; i16 values scaled by 256.\\\bottomrule
 \end{tabularx}
 
-All outputs passed exact sample checks. These are cached read measurements;
-writer, disk-streaming and end-to-end receiver throughput were not measured.
-Compare configurations within a selection column.
+\subsection*{Payload and conversion control}
+\input{benchmarks/control-table.tex}
+
+Times are milliseconds for the full selection. Both payloads use the same OS
+read routine and preallocated buffers; HDF5 payload offsets are resolved before
+timing. Conversion uses the same function and destination buffer for both.
+The control excludes HDF5 API calls and metadata lookup. Read order alternates.
+
+All outputs passed exact byte/sample checks. API timings include allocation
+and conversion; they compare reader implementations, not format overhead alone.
+Measurements use warm caches and do not measure sustained disk I/O.
 % Source identity, toolchain, individual timings and verification flags are
 % retained in docs/benchmarks/feature-matrix.h5. Table generation is documented
 % in docs/benchmarks/README.md.

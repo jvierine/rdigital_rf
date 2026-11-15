@@ -172,3 +172,33 @@ fn ring_order_uses_numeric_seconds() -> anyhow::Result<()> {
     assert_eq!(r.bounds("ch0")?, Some((100, 119)));
     Ok(())
 }
+
+#[test]
+fn packed_complex_float_paths_preserve_values() -> anyhow::Result<()> {
+    for component in [Component::F32, Component::F64] {
+        let dir = TempDir::new()?;
+        let mut o = options();
+        o.component = component;
+        let mut writer = RawWriter::create(dir.path().join("ch0"), o)?;
+        let values = [-0.0f64, 1.25, -2.5, f64::INFINITY];
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|&v| {
+                if component == Component::F32 {
+                    (v as f32).to_le_bytes().to_vec()
+                } else {
+                    v.to_le_bytes().to_vec()
+                }
+            })
+            .collect();
+        writer.write(0, &bytes)?;
+        writer.flush()?;
+        let mut r = Reader::open([dir.path()])?;
+        let got = r.read_complex32(0, 2, "ch0", 0)?;
+        assert_eq!(got[0].re.to_bits(), (-0.0f32).to_bits());
+        assert_eq!(got[0].im, 1.25);
+        assert_eq!(got[1].re, -2.5);
+        assert_eq!(got[1].im, f32::INFINITY);
+    }
+    Ok(())
+}

@@ -40,18 +40,20 @@ Ordinary HDF5 writing, Digital Metadata and remote transports are not implemente
 [Method and reproduction](docs/benchmarks/README.md) ·
 [HDF5 measurements](docs/benchmarks/feature-matrix.h5)
 
-Complex-i8, warm-cache medians over five repeats, milliseconds:
+Complex-i8, warm-cache medians over 15 repeats in three processes, milliseconds:
 
 | Configuration | Full | Sparse |
 |---|---:|---:|
-| Uncompressed HDF5, direct API | 2.88 | 0.59 |
-| Uncompressed HDF5, vector API | 25.77 | 0.88 |
-| Gzip HDF5, default cache | 51.49 | 3.59 |
-| Gzip HDF5, 128 KiB cache | 56.94 | 9.66 |
-| Raw, direct API | 18.27 | 1.05 |
+| Uncompressed HDF5, direct API | 2.68 | 0.59 |
+| Uncompressed HDF5, vector API | 25.19 | 0.85 |
+| Gzip HDF5, default cache | 51.77 | 3.66 |
+| Gzip HDF5, 128 KiB cache | 57.32 | 9.53 |
+| Raw, direct API | 2.07 | 0.13 |
 
 Full: 2,097,152 samples. Sparse: 32 windows of 4096 samples. Hardware, cache and
-layout settings, i16 results and API signatures are in the reference.
+layout settings, i16 results and API signatures are in the reference. A separate
+control uses identical OS reads and sample conversion for both payloads. API
+timings include each implementation's allocation and conversion costs.
 
 ## Validation
 

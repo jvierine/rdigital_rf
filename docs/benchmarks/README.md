@@ -32,3 +32,21 @@ Rebuild the reference table from the checked report:
 conda run -n base python docs/benchmarks/update_table.py
 make -C docs
 ```
+
+## Payload control
+
+For uncompressed HDF5, the dataset's physical payload offset is obtained before
+timing. Both files are then read with the same OS seek/read calls into
+preallocated byte buffers. The byte arrays must agree exactly. Both arrays
+use the same conversion function and preallocated output buffer. Read order
+alternates. This control excludes HDF5 API calls and metadata lookup.
+
+The current report combines three fresh processes with five timed repeats each.
+Individual reports are `audit-run-1.h5` through `audit-run-3.h5`.
+To regenerate the aggregate and tables:
+
+```sh
+conda run -n base python docs/benchmarks/combine_runs.py
+conda run -n base python docs/benchmarks/update_table.py
+make -C docs
+```

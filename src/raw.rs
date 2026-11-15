@@ -149,7 +149,7 @@ impl Chunk {
         let mut file = self.file.try_clone()?;
         // Positional reads avoid a shared seek cursor between reader threads.
         let mut out = Vec::with_capacity(b - a);
-        let chunk_rows = (1024 * 1024 / stride).max(1);
+        let chunk_rows = (1024 * 1024 / stride).max(1).min((b - a).max(1));
         let mut buf = vec![
             0u8;
             chunk_rows
@@ -175,10 +175,79 @@ impl Chunk {
         }
         Ok(out)
     }
-    pub fn read32(&self, a: usize, b: usize, ch: usize) -> Result<Vec<num_complex::Complex32>> {
-        self.read_values(a, b, ch, |r, i| {
+    fn packed32<const STRIDE: usize>(
+        &self,
+        a: usize,
+        b: usize,
+        convert: impl Fn(&[u8]) -> num_complex::Complex32,
+        out: &mut Vec<num_complex::Complex32>,
+    ) -> Result<()> {
+        ensure!(a <= b && b as u64 <= self.rows, "invalid raw selection");
+        let byte_count = (b - a)
+            .checked_mul(STRIDE)
+            .context("raw byte count overflow")?;
+        let offset = (a as u64)
+            .checked_mul(STRIDE as u64)
+            .context("raw offset overflow")?;
+        let mut bytes = vec![0u8; byte_count];
+        let mut file = self.file.try_clone()?;
+        read_at(&mut file, &mut bytes, offset)?;
+        out.extend(bytes.chunks_exact(STRIDE).map(convert));
+        Ok(())
+    }
+    pub fn append32(
+        &self,
+        a: usize,
+        b: usize,
+        ch: usize,
+        out: &mut Vec<num_complex::Complex32>,
+    ) -> Result<()> {
+        if self.ns == 1 && self.complex {
+            ensure!(ch == 0, "invalid raw subchannel");
+            use num_complex::Complex32 as Z;
+            return match self.component {
+                Component::I8 => {
+                    self.packed32::<2>(a, b, |v| Z::new(v[0] as i8 as f32, v[1] as i8 as f32), out)
+                }
+                Component::I16 => self.packed32::<4>(
+                    a,
+                    b,
+                    |v| {
+                        Z::new(
+                            i16::from_le_bytes([v[0], v[1]]) as f32,
+                            i16::from_le_bytes([v[2], v[3]]) as f32,
+                        )
+                    },
+                    out,
+                ),
+                Component::F32 => self.packed32::<8>(
+                    a,
+                    b,
+                    |v| {
+                        Z::new(
+                            f32::from_le_bytes(v[..4].try_into().unwrap()),
+                            f32::from_le_bytes(v[4..].try_into().unwrap()),
+                        )
+                    },
+                    out,
+                ),
+                Component::F64 => self.packed32::<16>(
+                    a,
+                    b,
+                    |v| {
+                        Z::new(
+                            f64::from_le_bytes(v[..8].try_into().unwrap()) as f32,
+                            f64::from_le_bytes(v[8..].try_into().unwrap()) as f32,
+                        )
+                    },
+                    out,
+                ),
+            };
+        }
+        out.extend(self.read_values(a, b, ch, |r, i| {
             num_complex::Complex32::new(r as f32, i as f32)
-        })
+        })?);
+        Ok(())
     }
     pub fn read64(&self, a: usize, b: usize, ch: usize) -> Result<Vec<Complex64>> {
         self.read_values(a, b, ch, Complex64::new)

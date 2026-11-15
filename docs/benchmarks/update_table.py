@@ -26,3 +26,13 @@ with h5py.File(root / 'feature-matrix.h5', 'r') as report:
         lines.append(f'{label} & {component} & {api} & {a:.2f} & {b:.2f} ' + r'\\')
 lines.extend([r'\bottomrule', r'\end{tabularx}'])
 (root / 'table.tex').write_text('\n'.join(lines) + '\n')
+
+lines = [r'\begin{tabularx}{\linewidth}{@{}Xrrrr@{}}\toprule',
+         r'Type & HDF5 bytes & Raw bytes & HDF5 convert & Raw convert\\\midrule']
+with h5py.File(root / 'feature-matrix.h5', 'r') as report:
+    for bits in [8, 16]:
+        labels = ['hdf_payload', 'raw_payload', 'hdf_shared_conversion', 'raw_shared_conversion']
+        times = [report[f'audit_i{bits}_{label}']['median_seconds'][()] * 1000 for label in labels]
+        lines.append(f'i{bits} & ' + ' & '.join(f'{t:.2f}' for t in times) + ' ' + r'\\')
+lines.extend([r'\bottomrule', r'\end{tabularx}'])
+(root / 'control-table.tex').write_text('\n'.join(lines) + '\n')

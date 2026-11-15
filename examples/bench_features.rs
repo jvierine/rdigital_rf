@@ -168,6 +168,101 @@ fn disk_bytes(root: &Path) -> Result<u64> {
     }
     Ok(n)
 }
+fn expand(bytes: &[u8], bits: u32, out: &mut Vec<num_complex::Complex32>) {
+    out.clear();
+    if bits == 8 {
+        out.extend(
+            bytes
+                .chunks_exact(2)
+                .map(|b| num_complex::Complex32::new(b[0] as i8 as f32, b[1] as i8 as f32)),
+        )
+    } else {
+        out.extend(bytes.chunks_exact(4).map(|b| {
+            num_complex::Complex32::new(
+                i16::from_le_bytes([b[0], b[1]]) as f32,
+                i16::from_le_bytes([b[2], b[3]]) as f32,
+            )
+        }))
+    }
+}
+fn audit(report: &File, root: &Path, bits: u32) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let hdf_path = root
+        .join(if bits == 8 { "hdf8" } else { "hdf16" })
+        .join("ch0/1970-01-01T00-00-00/rf@0.000.h5");
+    let h = File::open(&hdf_path)?;
+    let ds = h.dataset("rf_data")?;
+    let offsets = [
+        ds.offset()
+            .context("contiguous payload offset unavailable")?,
+        0,
+    ];
+    let mut files = [
+        std::fs::File::open(hdf_path)?,
+        std::fs::File::open(
+            root.join(if bits == 8 { "raw8" } else { "raw16" })
+                .join("ch0/1970-01-01T00-00-00/rf@0.000.raw"),
+        )?,
+    ];
+    let mut payloads = [
+        vec![0u8; N * (bits / 4) as usize],
+        vec![0u8; N * (bits / 4) as usize],
+    ];
+    let mut times: [Vec<f64>; 4] = std::array::from_fn(|_| vec![]);
+    let mut output = Vec::with_capacity(N);
+    for rep in 0..=REPEATS {
+        for side in if rep % 2 == 0 { [0, 1] } else { [1, 0] } {
+            let t = Instant::now();
+            files[side].seek(SeekFrom::Start(offsets[side]))?;
+            files[side].read_exact(&mut payloads[side])?;
+            let elapsed = t.elapsed().as_secs_f64();
+            if rep > 0 {
+                times[side].push(elapsed);
+            }
+        }
+        ensure!(payloads[0] == payloads[1], "audit payloads differ");
+        for side in if rep % 2 == 0 { [0, 1] } else { [1, 0] } {
+            let t = Instant::now();
+            expand(std::hint::black_box(&payloads[side]), bits, &mut output);
+            let elapsed = t.elapsed().as_secs_f64();
+            for (r, z) in output.iter().enumerate() {
+                let (a, b) = value(r, bits);
+                ensure!(z.re == a && z.im == b, "audit conversion differs");
+            }
+            if rep > 0 {
+                times[side + 2].push(elapsed);
+            }
+        }
+    }
+    for (i, label) in [
+        "hdf_payload",
+        "raw_payload",
+        "hdf_shared_conversion",
+        "raw_shared_conversion",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut sorted = times[i].clone();
+        sorted.sort_by(f64::total_cmp);
+        let median = sorted[REPEATS / 2];
+        let g = report.create_group(&format!("audit_i{bits}_{label}"))?;
+        g.new_dataset_builder()
+            .with_data(&times[i])
+            .create("seconds")?;
+        g.new_dataset::<f64>()
+            .create("median_seconds")?
+            .write_scalar(&median)?;
+        g.new_dataset::<u64>()
+            .create("exact_equal")?
+            .write_scalar(&1)?;
+        println!(
+            "audit i{bits} {label:24} median_ms={:.3} exact=true",
+            median * 1000.
+        );
+    }
+    Ok(())
+}
 fn main() -> Result<()> {
     let out = std::env::args()
         .nth(1)
@@ -267,6 +362,9 @@ fn main() -> Result<()> {
             );
         }
     }
+    text(&report,"control_method","Contiguous HDF5 payload offset resolved before timing. Both payload files read using identical seek/read_exact into preallocated buffers; alternating order. Identical conversion routine reuses one preallocated output. No HDF5 API call or allocation inside payload control timer.")?;
+    audit(&report, tmp.path(), 8)?;
+    audit(&report, tmp.path(), 16)?;
     report.flush()?;
     Ok(())
 }
