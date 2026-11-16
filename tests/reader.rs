@@ -53,6 +53,36 @@ fn properties(root: &Path, n: u64, d: u64, channels: usize) -> PathBuf {
         .unwrap();
     p
 }
+#[test]
+fn packet_index_coalescing_keeps_exact_samples_and_gap_bounds() {
+    let d = tempfile::tempdir().unwrap();
+    let ch = properties(d.path(), 100, 1, 1);
+    file(
+        &ch,
+        0,
+        &[[0, 0], [2, 2], [6, 4], [8, 6]],
+        &[0, 1, 2, 3, 6, 7, 8, 9],
+        1,
+    );
+    let mut r = Reader::open([d.path()]).unwrap();
+    let v = r.read_complex32(0, 4, "ch", 0).unwrap();
+    assert_eq!(
+        v.iter().map(|z| z.re).collect::<Vec<_>>(),
+        vec![0., 1., 2., 3.]
+    );
+    let v = r.read_complex32(6, 4, "ch", 0).unwrap();
+    assert_eq!(
+        v.iter().map(|z| z.re).collect::<Vec<_>>(),
+        vec![6., 7., 8., 9.]
+    );
+    let e = r.read_complex32(0, 10, "ch", 0).unwrap_err();
+    assert_eq!(
+        e.downcast_ref::<rdigital_rf::MissingSamples>()
+            .unwrap()
+            .gaps,
+        vec![4..6]
+    );
+}
 fn file(channel: &Path, ms: u64, index: &[[u64; 2]], logical: &[i16], ns: usize) {
     let dir = channel.join(
         chrono::DateTime::from_timestamp((ms / 1000 / 3600 * 3600) as i64, 0)

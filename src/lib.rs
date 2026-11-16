@@ -102,6 +102,15 @@ struct Cached {
     index: Vec<(u64, u64)>,
     rows: u64,
 }
+// Recorder calls can leave an index row per packet even when samples and
+// storage offsets are continuous. Keep boundaries only where the mapping
+// changes, so one requested span becomes one HDF5 selection per true block.
+fn coalesce_index(index: &mut Vec<(u64, u64)>) {
+    index.dedup_by(|later, earlier| {
+        matches!((later.0.checked_sub(earlier.0), later.1.checked_sub(earlier.1)),
+            (Some(samples), Some(rows)) if samples == rows)
+    });
+}
 #[derive(Clone, Debug)]
 pub struct SourceSpan {
     pub samples: Range<u64>,
@@ -546,7 +555,8 @@ impl Reader {
                 }
                 Err(e) => return Err(e),
             };
-            let index = raw.index.clone();
+            let mut index = raw.index.clone();
+            coalesce_index(&mut index);
             let rows = raw.rows;
             self.stats.file_opens += 1;
             self.cache.push_back(Cached {
@@ -603,7 +613,7 @@ impl Reader {
             idx.shape().len() == 2 && idx.shape()[1] == 2,
             "invalid rf_data_index"
         );
-        let index: Vec<_> = idx
+        let mut index: Vec<_> = idx
             .read_raw::<u64>()?
             .as_chunks::<2>()
             .0
@@ -625,6 +635,7 @@ impl Reader {
                 ensure!(stop <= next.0, "overlapping rf_data_index blocks");
             }
         }
+        coalesce_index(&mut index);
         self.cache.push_back(Cached {
             path: path.to_owned(),
             _file: h,
@@ -802,5 +813,19 @@ impl Reader {
             }
         }
         Ok(first.zip(last))
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::coalesce_index;
+    #[test]
+    fn merges_contiguous_packets_but_keeps_real_gaps() {
+        let mut index = vec![(100, 0), (110, 10), (135, 20), (145, 30)];
+        coalesce_index(&mut index);
+        assert_eq!(index, vec![(100, 0), (135, 20)]);
+        let mut high = vec![(u64::MAX - 20, 0), (u64::MAX - 10, 10)];
+        coalesce_index(&mut high);
+        assert_eq!(high, vec![(u64::MAX - 20, 0)]);
     }
 }
