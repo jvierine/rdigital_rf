@@ -227,6 +227,10 @@ impl Cached {
             return raw.append_typed(a, b, ch, out);
         }
         let data = self.data.as_ref().unwrap();
+        // A one-channel dataset is a contiguous two-dimensional slab. Preserve
+        // that rank through HDF5 rather than squeezing each selected row into
+        // a rank-one memory selection (slow with older chunked HDF5 readers).
+        let ch = if data.shape()[1] == 1 { None } else { ch };
         let desc = data.dtype()?.to_descriptor()?;
         let scalar = if complex {
             match &desc {
